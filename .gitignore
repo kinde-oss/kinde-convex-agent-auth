@@ -36,3 +36,6 @@ coverage/
 # Convex local state
 .env.local
 .convex/
+
+# Claude Code local config
+.claude/
