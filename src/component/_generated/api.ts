@@ -9,9 +9,13 @@
  */
 
 import type * as agents from "../agents.js";
+import type * as config from "../config.js";
 import type * as helpers from "../helpers.js";
 import type * as instances from "../instances.js";
+import type * as jwks from "../jwks.js";
+import type * as revocations from "../revocations.js";
 import type * as validators from "../validators.js";
+import type * as verification from "../verification.js";
 
 import type {
   ApiFromModules,
@@ -22,9 +26,13 @@ import { anyApi, componentsGeneric } from "convex/server";
 
 const fullApi: ApiFromModules<{
   agents: typeof agents;
+  config: typeof config;
   helpers: typeof helpers;
   instances: typeof instances;
+  jwks: typeof jwks;
+  revocations: typeof revocations;
   validators: typeof validators;
+  verification: typeof verification;
 }> = anyApi as any;
 
 /**

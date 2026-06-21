@@ -119,6 +119,15 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Name
       >;
     };
+    config: {
+      get: FunctionReference<
+        "query",
+        "internal",
+        {},
+        { audience: string | null; domain: string; mode: "test" | "live" },
+        Name
+      >;
+    };
     instances: {
       complete: FunctionReference<
         "mutation",
@@ -171,6 +180,93 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           orgCode?: string | null;
           runId: string;
         },
+        string,
+        Name
+      >;
+    };
+    jwks: {
+      get: FunctionReference<
+        "query",
+        "internal",
+        {},
+        {
+          _creationTime: number;
+          _id: string;
+          domain: string;
+          fetchedAt: number;
+          keys: Array<Record<string, string | Array<string>>>;
+        } | null,
+        Name
+      >;
+      refresh: FunctionReference<
+        "action",
+        "internal",
+        {},
+        Array<Record<string, string | Array<string>>>,
+        Name
+      >;
+    };
+    revocations: {
+      check: FunctionReference<
+        "query",
+        "internal",
+        { agentId?: string; instanceId?: string; orgCode?: string },
+        {
+          _creationTime: number;
+          _id: string;
+          createdAt: number;
+          reason: string;
+          targetId: string | null;
+          targetKind: "instance" | "agent" | "org" | "global";
+        } | null,
+        Name
+      >;
+      clear: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          targetId?: string | null;
+          targetKind: "instance" | "agent" | "org" | "global";
+        },
+        number,
+        Name
+      >;
+      revoke: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          reason?: string;
+          targetId?: string | null;
+          targetKind: "instance" | "agent" | "org" | "global";
+        },
+        string,
+        Name
+      >;
+    };
+    verification: {
+      check: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          expectedOrgCode?: string;
+          kindeClientId: string | null;
+          orgCode: string | null;
+          subject: string;
+          tokenScopes: Array<string>;
+        },
+        | { agentId: string | null; allowed: true; correlationId: string }
+        | {
+            allowed: false;
+            code: string;
+            correlationId: string;
+            reason: string;
+          },
+        Name
+      >;
+      recordRejection: FunctionReference<
+        "mutation",
+        "internal",
+        { code: string; reason: string },
         string,
         Name
       >;
