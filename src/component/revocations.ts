@@ -2,6 +2,7 @@ import {v} from 'convex/values';
 import type {Infer} from 'convex/values';
 import {mutation, query} from './_generated/server.js';
 import type {QueryCtx} from './_generated/server.js';
+import type {Doc} from './_generated/dataModel.js';
 import schema from './schema.js';
 import {fail, writeAudit} from './helpers.js';
 import {nullableString, revocationTargetKindValidator} from './validators.js';
@@ -24,6 +25,40 @@ async function findRevocation(
       q.eq('targetKind', targetKind).eq('targetId', targetId)
     )
     .first();
+}
+
+/**
+ * The revocation overlay (invariant I2): the highest-precedence matching
+ * revocation — global > org > agent > instance — or null. Shared by the
+ * `check` query and `authz.can` so the precedence lives in exactly one place.
+ */
+export async function findActiveRevocation(
+  ctx: QueryCtx,
+  args: {agentId?: string; instanceId?: string; orgCode?: string}
+): Promise<Doc<'revocations'> | null> {
+  const global = await findRevocation(ctx, 'global', null);
+  if (global !== null) {
+    return global;
+  }
+  if (args.orgCode !== undefined) {
+    const org = await findRevocation(ctx, 'org', args.orgCode);
+    if (org !== null) {
+      return org;
+    }
+  }
+  if (args.agentId !== undefined) {
+    const agent = await findRevocation(ctx, 'agent', args.agentId);
+    if (agent !== null) {
+      return agent;
+    }
+  }
+  if (args.instanceId !== undefined) {
+    const instance = await findRevocation(ctx, 'instance', args.instanceId);
+    if (instance !== null) {
+      return instance;
+    }
+  }
+  return null;
 }
 
 /**
@@ -122,28 +157,6 @@ export const check = query({
   },
   returns: v.union(revocationDoc, v.null()),
   handler: async (ctx, args) => {
-    const global = await findRevocation(ctx, 'global', null);
-    if (global !== null) {
-      return global;
-    }
-    if (args.orgCode !== undefined) {
-      const org = await findRevocation(ctx, 'org', args.orgCode);
-      if (org !== null) {
-        return org;
-      }
-    }
-    if (args.agentId !== undefined) {
-      const agent = await findRevocation(ctx, 'agent', args.agentId);
-      if (agent !== null) {
-        return agent;
-      }
-    }
-    if (args.instanceId !== undefined) {
-      const instance = await findRevocation(ctx, 'instance', args.instanceId);
-      if (instance !== null) {
-        return instance;
-      }
-    }
-    return null;
+    return await findActiveRevocation(ctx, args);
   }
 });

@@ -119,6 +119,20 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Name
       >;
     };
+    authz: {
+      can: FunctionReference<
+        "mutation",
+        "internal",
+        { action: string; instanceId: string; resource?: string },
+        {
+          allowed: boolean;
+          correlationId: string;
+          reason: string;
+          requiredScopes?: Array<string>;
+        },
+        Name
+      >;
+    };
     config: {
       get: FunctionReference<
         "query",
@@ -269,6 +283,36 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         {},
         Array<Record<string, string | Array<string>>>,
+        Name
+      >;
+    };
+    policies: {
+      getTenantPolicy: FunctionReference<
+        "query",
+        "internal",
+        { orgCode: string },
+        {
+          _creationTime: number;
+          _id: string;
+          allowAutonomous: boolean;
+          allowedToolsOverride: Array<string> | null;
+          disabled: boolean;
+          orgCode: string;
+          requireApprovalForAll: boolean;
+        } | null,
+        Name
+      >;
+      setTenantPolicy: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          allowAutonomous: boolean;
+          allowedToolsOverride?: Array<string> | null;
+          disabled: boolean;
+          orgCode: string;
+          requireApprovalForAll: boolean;
+        },
+        string,
         Name
       >;
     };
