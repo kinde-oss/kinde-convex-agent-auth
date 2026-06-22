@@ -128,6 +128,72 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Name
       >;
     };
+    delegations: {
+      get: FunctionReference<
+        "query",
+        "internal",
+        { delegationId: string },
+        {
+          _creationTime: number;
+          _id: string;
+          agentId: string;
+          expiresAt: number;
+          issuerKind: "user" | "org";
+          issuerSubject: string;
+          resources: Array<string> | null;
+          revokedAt: number | null;
+          scopes: Array<string>;
+          signature: string;
+        } | null,
+        Name
+      >;
+      issue: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          agentId: string;
+          expiresAt: number;
+          issuerKind: "user" | "org";
+          issuerSubject: string;
+          resources?: Array<string> | null;
+          scopes: Array<string>;
+        },
+        string,
+        Name
+      >;
+      listForAgent: FunctionReference<
+        "query",
+        "internal",
+        { agentId: string; limit?: number },
+        Array<{
+          _creationTime: number;
+          _id: string;
+          agentId: string;
+          expiresAt: number;
+          issuerKind: "user" | "org";
+          issuerSubject: string;
+          resources: Array<string> | null;
+          revokedAt: number | null;
+          scopes: Array<string>;
+          signature: string;
+        }>,
+        Name
+      >;
+      revoke: FunctionReference<
+        "mutation",
+        "internal",
+        { delegationId: string; reason?: string },
+        null,
+        Name
+      >;
+      verify: FunctionReference<
+        "query",
+        "internal",
+        { delegationId: string },
+        { valid: true } | { code: string; reason: string; valid: false },
+        Name
+      >;
+    };
     instances: {
       complete: FunctionReference<
         "mutation",
