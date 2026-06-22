@@ -119,6 +119,51 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Name
       >;
     };
+    audit: {
+      query: FunctionReference<
+        "query",
+        "internal",
+        {
+          agentId?: string;
+          endAt?: number;
+          eventType?: string;
+          orgCode?: string;
+          paginationOpts: {
+            cursor: string | null;
+            endCursor?: string | null;
+            id?: number;
+            maximumBytesRead?: number;
+            maximumRowsRead?: number;
+            numItems: number;
+          };
+          startAt?: number;
+        },
+        {
+          continueCursor: string;
+          isDone: boolean;
+          page: Array<{
+            _creationTime: number;
+            _id: string;
+            actingFor: string | null;
+            agentId: string | null;
+            at: number;
+            correlationId: string | null;
+            decision: "allow" | "deny" | null;
+            detail: Record<
+              string,
+              string | number | boolean | null | Array<string>
+            >;
+            eventType: string;
+            instanceId: string | null;
+            orgCode: string | null;
+            scopesUsed: Array<string> | null;
+          }>;
+          pageStatus?: "SplitRecommended" | "SplitRequired" | null;
+          splitCursor?: string | null;
+        },
+        Name
+      >;
+    };
     authz: {
       can: FunctionReference<
         "mutation",

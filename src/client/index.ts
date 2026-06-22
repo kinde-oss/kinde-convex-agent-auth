@@ -14,6 +14,8 @@ export type {
   VerifyCallerOptions,
   RunActionCtx
 } from './verifyCaller.js';
+export {registerRoutes} from './http.js';
+export type {RegisterRoutesOptions} from './http.js';
 export type {ComponentApi} from '../component/_generated/component.js';
 
 export type RunQueryCtx = Pick<GenericActionCtx<GenericDataModel>, 'runQuery'>;

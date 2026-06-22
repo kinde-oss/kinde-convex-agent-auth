@@ -9,6 +9,7 @@
  */
 
 import type * as agents from "../agents.js";
+import type * as audit from "../audit.js";
 import type * as authz from "../authz.js";
 import type * as config from "../config.js";
 import type * as delegations from "../delegations.js";
@@ -31,6 +32,7 @@ import { anyApi, componentsGeneric } from "convex/server";
 
 const fullApi: ApiFromModules<{
   agents: typeof agents;
+  audit: typeof audit;
   authz: typeof authz;
   config: typeof config;
   delegations: typeof delegations;
