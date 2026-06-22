@@ -1,5 +1,6 @@
 import type {
   FunctionArgs,
+  FunctionReturnType,
   GenericActionCtx,
   GenericDataModel
 } from 'convex/server';
@@ -24,6 +25,49 @@ export type RunFullCtx = Pick<
   GenericActionCtx<GenericDataModel>,
   'runQuery' | 'runMutation' | 'runAction'
 >;
+
+export type ElevationRequest = NonNullable<
+  FunctionReturnType<ComponentApi['elevation']['getStatus']>
+>;
+
+export interface WaitForElevationOptions {
+  /** How often to re-read the request while it is pending. Default 1000ms. */
+  intervalMs?: number;
+  /** Give up and return the still-pending row after this long. Default 60s. */
+  timeoutMs?: number;
+}
+
+/**
+ * Wait for an elevation request to leave `pending` (becoming approved, denied,
+ * or — via the effective-status overlay — expired), then resolve with the row
+ * (or null if it was deleted).
+ *
+ * This is a convenience wrapper over `elevation.getStatus`. In a real app you
+ * usually do NOT need it: the agent's run lives in a reactive context, so a
+ * `useQuery`/subscription on the elevation row re-fires the moment a human
+ * approves and the run resumes with no polling at all. Use this helper from
+ * non-reactive contexts (e.g. a one-shot action) where you must block until a
+ * decision is made; it polls `getStatus` on `intervalMs` up to `timeoutMs`.
+ */
+export async function waitForElevation(
+  ctx: RunQueryCtx,
+  component: ComponentApi,
+  requestId: FunctionArgs<ComponentApi['elevation']['getStatus']>['requestId'],
+  opts: WaitForElevationOptions = {}
+): Promise<ElevationRequest | null> {
+  const intervalMs = opts.intervalMs ?? 1000;
+  const deadline = Date.now() + (opts.timeoutMs ?? 60_000);
+  for (;;) {
+    const row = await ctx.runQuery(component.elevation.getStatus, {requestId});
+    if (row === null || row.status !== 'pending') {
+      return row;
+    }
+    if (Date.now() >= deadline) {
+      return row;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
 
 export interface AgentAuthOptions {
   /** Kinde domain override. Defaults to the component's KINDE_DOMAIN. */

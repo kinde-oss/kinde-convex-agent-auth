@@ -208,6 +208,72 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Name
       >;
     };
+    elevation: {
+      approve: FunctionReference<
+        "mutation",
+        "internal",
+        { approverSubject: string; requestId: string },
+        null,
+        Name
+      >;
+      deny: FunctionReference<
+        "mutation",
+        "internal",
+        { approverSubject: string; requestId: string },
+        null,
+        Name
+      >;
+      getStatus: FunctionReference<
+        "query",
+        "internal",
+        { requestId: string },
+        {
+          _creationTime: number;
+          _id: string;
+          approverSubject: string | null;
+          expiresAt: number;
+          instanceId: string;
+          reason: string;
+          requestedScopes: Array<string>;
+          resolvedAt: number | null;
+          status: "pending" | "approved" | "denied" | "expired";
+        } | null,
+        Name
+      >;
+      listForInstance: FunctionReference<
+        "query",
+        "internal",
+        {
+          instanceId: string;
+          limit?: number;
+          status?: "pending" | "approved" | "denied" | "expired";
+        },
+        Array<{
+          _creationTime: number;
+          _id: string;
+          approverSubject: string | null;
+          expiresAt: number;
+          instanceId: string;
+          reason: string;
+          requestedScopes: Array<string>;
+          resolvedAt: number | null;
+          status: "pending" | "approved" | "denied" | "expired";
+        }>,
+        Name
+      >;
+      request: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          expiresAt?: number;
+          instanceId: string;
+          reason: string;
+          requestedScopes: Array<string>;
+        },
+        string,
+        Name
+      >;
+    };
     instances: {
       complete: FunctionReference<
         "mutation",

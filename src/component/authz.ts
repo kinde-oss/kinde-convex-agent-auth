@@ -2,7 +2,11 @@ import {v} from 'convex/values';
 import {mutation} from './_generated/server.js';
 import type {MutationCtx} from './_generated/server.js';
 import type {Doc, Id} from './_generated/dataModel.js';
-import {effectiveInstanceStatus, writeAudit} from './helpers.js';
+import {
+  effectiveElevationStatus,
+  effectiveInstanceStatus,
+  writeAudit
+} from './helpers.js';
 import {findActiveRevocation} from './revocations.js';
 import {intersectScopes} from './scopes.js';
 
@@ -52,6 +56,30 @@ async function findActiveDelegation(
 }
 
 /**
+ * Whether an approved, non-expired elevation grants `action` to THIS instance
+ * (invariant I6). Elevations are keyed by instance, never widen beyond their
+ * requestedScopes, and stop applying once expired — all enforced here.
+ */
+async function hasApprovedElevation(
+  ctx: MutationCtx,
+  instanceId: Id<'instances'>,
+  action: string,
+  now: number
+): Promise<boolean> {
+  const rows = await ctx.db
+    .query('elevationRequests')
+    .withIndex('by_instance', (q) =>
+      q.eq('instanceId', instanceId).eq('status', 'approved')
+    )
+    .collect();
+  return rows.some(
+    (row) =>
+      effectiveElevationStatus(row, now) === 'approved' &&
+      row.requestedScopes.includes(action)
+  );
+}
+
+/**
  * The authorization decision pipeline. Deny short-circuits at the first failed
  * gate; every path — allow or deny — writes exactly one `authz.decision` audit
  * row carrying the correlationId returned to the caller (invariant I4). The
@@ -77,6 +105,7 @@ export const can = mutation({
         orgCode?: string | null;
         scopesUsed?: string[] | null;
         requiredScopes?: string[];
+        grantedVia?: 'elevation';
       } = {}
     ) => {
       const correlationId = await writeAudit(ctx, {
@@ -86,7 +115,14 @@ export const can = mutation({
         orgCode: context.orgCode ?? null,
         scopesUsed: context.scopesUsed ?? null,
         decision: allowed ? 'allow' : 'deny',
-        detail: {action: args.action, resource, reason}
+        detail: {
+          action: args.action,
+          resource,
+          reason,
+          ...(context.grantedVia === undefined
+            ? {}
+            : {grantedVia: context.grantedVia})
+        }
       });
       return {
         allowed,
@@ -142,6 +178,16 @@ export const can = mutation({
       });
     }
 
+    // An approved, non-expired human elevation covering this action augments
+    // the decision for this instance only (invariant I6). Computed once and
+    // reused by both the approval gate and the final scope check.
+    const elevated = await hasApprovedElevation(
+      ctx,
+      args.instanceId,
+      args.action,
+      now
+    );
+
     // 5. Tenant policy gates.
     const tenantPolicy =
       orgCode === null
@@ -157,7 +203,13 @@ export const can = mutation({
         scopesUsed: agent.scopes
       });
     }
-    if (tenantPolicy !== null && tenantPolicy.requireApprovalForAll) {
+    // requireApprovalForAll denies every action unless a human has elevated
+    // this specific one.
+    if (
+      tenantPolicy !== null &&
+      tenantPolicy.requireApprovalForAll &&
+      !elevated
+    ) {
       return await decide(false, 'approval_required', {
         agentId: agent._id,
         orgCode,
@@ -204,20 +256,40 @@ export const can = mutation({
         scopesUsed: effective
       });
     }
-    if (!effective.includes(args.action)) {
-      return await decide(false, 'insufficient_scope', {
+
+    // 8. Authorize. Under requireApprovalForAll the only way to reach here is a
+    // covering elevation, so the grant is via elevation. Otherwise a normal
+    // in-scope action is authorized directly; an out-of-scope action is allowed
+    // only if a human elevation covers it (I6), else denied.
+    const requireApproval = tenantPolicy?.requireApprovalForAll ?? false;
+    if (requireApproval) {
+      return await decide(true, 'authorized', {
         agentId: agent._id,
         orgCode,
         scopesUsed: effective,
-        requiredScopes: [args.action]
+        grantedVia: 'elevation'
       });
     }
-
-    // 8. Authorized.
-    return await decide(true, 'authorized', {
+    if (effective.includes(args.action)) {
+      return await decide(true, 'authorized', {
+        agentId: agent._id,
+        orgCode,
+        scopesUsed: effective
+      });
+    }
+    if (elevated) {
+      return await decide(true, 'authorized', {
+        agentId: agent._id,
+        orgCode,
+        scopesUsed: effective,
+        grantedVia: 'elevation'
+      });
+    }
+    return await decide(false, 'insufficient_scope', {
       agentId: agent._id,
       orgCode,
-      scopesUsed: effective
+      scopesUsed: effective,
+      requiredScopes: [args.action]
     });
   }
 });

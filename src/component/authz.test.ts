@@ -500,3 +500,166 @@ describe('authz.can', () => {
     expect(allowed).toMatchObject({allowed: true, reason: 'authorized'});
   });
 });
+
+describe('authz.can + elevation (I6)', () => {
+  test('an approved elevation grants the action and audits grantedVia (I4)', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const requestId = await t.mutation(api.elevation.request, {
+      instanceId,
+      requestedScopes: ['write'],
+      reason: 'need write'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId,
+      approverSubject: 'human_admin'
+    });
+
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'write'
+    });
+    expect(result).toMatchObject({allowed: true, reason: 'authorized'});
+
+    const rows = await authzRows(t);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('allow');
+    expect(rows[0].detail).toMatchObject({
+      action: 'write',
+      grantedVia: 'elevation'
+    });
+  });
+
+  test('the same approval does not leak to a sibling instance (I6)', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceA = await startInstance(t, agentId);
+    const instanceB = await startInstance(t, agentId);
+    const requestId = await t.mutation(api.elevation.request, {
+      instanceId: instanceA,
+      requestedScopes: ['write'],
+      reason: 'need write'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId,
+      approverSubject: 'human_admin'
+    });
+
+    expect(
+      await t.mutation(api.authz.can, {instanceId: instanceA, action: 'write'})
+    ).toMatchObject({allowed: true, reason: 'authorized'});
+    // Instance B has no elevation of its own → still denied.
+    expect(
+      await t.mutation(api.authz.can, {instanceId: instanceB, action: 'write'})
+    ).toMatchObject({allowed: false, reason: 'insufficient_scope'});
+  });
+
+  test('an action outside the requestedScopes is still denied (I6)', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const requestId = await t.mutation(api.elevation.request, {
+      instanceId,
+      requestedScopes: ['write'],
+      reason: 'need write'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId,
+      approverSubject: 'human_admin'
+    });
+    // "delete" is covered by neither the agent's scopes nor the elevation.
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'delete'})
+    ).toMatchObject({
+      allowed: false,
+      reason: 'insufficient_scope',
+      requiredScopes: ['delete']
+    });
+  });
+
+  test('an expired elevation stops applying (I6)', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const requestId = await t.mutation(api.elevation.request, {
+      instanceId,
+      requestedScopes: ['write'],
+      reason: 'need write'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId,
+      approverSubject: 'human_admin'
+    });
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'write'})
+    ).toMatchObject({allowed: true});
+
+    await t.run(async (ctx) =>
+      ctx.db.patch('elevationRequests', requestId, {
+        expiresAt: Date.now() - 1000
+      })
+    );
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'write'})
+    ).toMatchObject({allowed: false, reason: 'insufficient_scope'});
+  });
+
+  test('requireApprovalForAll: denied without elevation, allowed with one', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read'],
+      orgCode: 'org_1'
+    });
+    const instanceId = await startInstance(t, agentId, {orgCode: 'org_1'});
+    await t.mutation(api.policies.setTenantPolicy, {
+      orgCode: 'org_1',
+      allowAutonomous: true,
+      requireApprovalForAll: true,
+      disabled: false
+    });
+
+    // "read" is in scope, but requireApprovalForAll denies it without approval.
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'read'})
+    ).toMatchObject({allowed: false, reason: 'approval_required'});
+
+    const requestId = await t.mutation(api.elevation.request, {
+      instanceId,
+      requestedScopes: ['read'],
+      reason: 'approval gate'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId,
+      approverSubject: 'human_admin'
+    });
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'read'
+    });
+    expect(result).toMatchObject({allowed: true, reason: 'authorized'});
+  });
+});

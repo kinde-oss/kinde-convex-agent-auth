@@ -4,6 +4,7 @@ import type {MutationCtx} from './_generated/server.js';
 import type {Doc, Id} from './_generated/dataModel.js';
 import type {
   decisionValidator,
+  elevationStatusValidator,
   instanceStatusValidator,
   metadataValidator
 } from './validators.js';
@@ -11,6 +12,7 @@ import type {
 export type Metadata = Infer<typeof metadataValidator>;
 export type Decision = Infer<typeof decisionValidator>;
 export type InstanceStatus = Infer<typeof instanceStatusValidator>;
+export type ElevationStatus = Infer<typeof elevationStatusValidator>;
 
 /**
  * Throw a machine-readable error. `code` is a stable identifier callers can
@@ -69,4 +71,20 @@ export function effectiveInstanceStatus(
     return 'expired';
   }
   return instance.status;
+}
+
+/**
+ * The status an elevation request behaves as right now. An approved grant past
+ * its expiry reads as "expired" (invariant I6) without mutating the stored row,
+ * exactly mirroring {@link effectiveInstanceStatus}. Pending/denied/expired
+ * statuses are returned unchanged.
+ */
+export function effectiveElevationStatus(
+  row: Pick<Doc<'elevationRequests'>, 'status' | 'expiresAt'>,
+  now: number
+): ElevationStatus {
+  if (row.status === 'approved' && row.expiresAt <= now) {
+    return 'expired';
+  }
+  return row.status;
 }

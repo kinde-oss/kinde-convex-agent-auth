@@ -12,6 +12,7 @@ import type * as agents from "../agents.js";
 import type * as authz from "../authz.js";
 import type * as config from "../config.js";
 import type * as delegations from "../delegations.js";
+import type * as elevation from "../elevation.js";
 import type * as helpers from "../helpers.js";
 import type * as instances from "../instances.js";
 import type * as jwks from "../jwks.js";
@@ -33,6 +34,7 @@ const fullApi: ApiFromModules<{
   authz: typeof authz;
   config: typeof config;
   delegations: typeof delegations;
+  elevation: typeof elevation;
   helpers: typeof helpers;
   instances: typeof instances;
   jwks: typeof jwks;
