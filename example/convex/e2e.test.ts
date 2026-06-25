@@ -100,6 +100,7 @@ async function mint(options: MintOptions = {}): Promise<string> {
 describe('end-to-end agent lifecycle', () => {
   beforeEach(() => {
     vi.stubEnv('KINDE_DOMAIN', DOMAIN);
+    vi.stubEnv('DELEGATION_SIGNING_SECRET', 'test-delegation-secret');
     stubKindeEndpoints();
   });
   afterEach(() => {

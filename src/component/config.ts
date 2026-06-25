@@ -4,6 +4,22 @@ import {fail} from './helpers.js';
 import {nullableString} from './validators.js';
 
 /**
+ * Validate the component's MODE env var, defaulting to "live". An unset value
+ * is fine; any value other than "test" or "live" is a configuration error and
+ * fails with a typed code rather than a generic return-validation failure.
+ */
+function requireMode(): 'test' | 'live' {
+  const mode = env.MODE;
+  if (mode === undefined || mode === 'live') {
+    return 'live';
+  }
+  if (mode === 'test') {
+    return 'test';
+  }
+  fail('invalid_mode', 'MODE must be either "test" or "live".');
+}
+
+/**
  * Read the component's configuration (from its typed environment variables).
  * The client layer uses this so the Kinde domain and audience only need to
  * be configured once, on the component. The signing secret is never exposed.
@@ -26,7 +42,7 @@ export const get = query({
     return {
       domain,
       audience: env.KINDE_AUDIENCE ?? null,
-      mode: env.MODE ?? 'live'
+      mode: requireMode()
     };
   }
 });

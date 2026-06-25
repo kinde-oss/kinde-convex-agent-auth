@@ -25,6 +25,23 @@ function requireDomain(): string {
 }
 
 /**
+ * Parse a response body as JSON, mapping a non-JSON body (e.g. an HTML error
+ * page) to a typed failure rather than letting a raw SyntaxError escape and
+ * break the machine-readable error contract.
+ */
+async function readJson(
+  response: Response,
+  url: string,
+  code: string
+): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch {
+    fail(code, `The response from ${url} is not valid JSON.`);
+  }
+}
+
+/**
  * Narrow an untrusted JSON value to a JWKS key array. JWK members are
  * strings or string arrays per RFC 7517; members of other types (e.g. the
  * boolean `ext`) are dropped — they are not needed for signature checks.
@@ -108,7 +125,11 @@ export const refresh = action({
         `Fetching ${configUrl} failed with status ${configResponse.status}.`
       );
     }
-    const config: unknown = await configResponse.json();
+    const config = await readJson(
+      configResponse,
+      configUrl,
+      'oidc_config_malformed'
+    );
     const jwksUri =
       typeof config === 'object' &&
       config !== null &&
@@ -129,7 +150,7 @@ export const refresh = action({
         `Fetching ${jwksUri} failed with status ${jwksResponse.status}.`
       );
     }
-    const jwks: unknown = await jwksResponse.json();
+    const jwks = await readJson(jwksResponse, jwksUri, 'jwks_malformed');
     const keys =
       typeof jwks === 'object' && jwks !== null && 'keys' in jwks
         ? toJwkArray((jwks as {keys: unknown}).keys)

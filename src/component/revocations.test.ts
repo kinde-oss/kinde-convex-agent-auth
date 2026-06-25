@@ -85,6 +85,26 @@ describe('revocations', () => {
     );
   });
 
+  test('a targetId supplied for a global revocation is rejected', async () => {
+    const t = initConvexTest();
+    // Silently coercing this to a global kill switch would mask the caller's
+    // intent to revoke a specific target.
+    await expectFail(
+      t.mutation(api.revocations.revoke, {
+        targetKind: 'global',
+        targetId: 'agent-1'
+      }),
+      'target_id_forbidden'
+    );
+    await expectFail(
+      t.mutation(api.revocations.clear, {
+        targetKind: 'global',
+        targetId: 'agent-1'
+      }),
+      'target_id_forbidden'
+    );
+  });
+
   test('clear removes the revocation and returns the count', async () => {
     const t = initConvexTest();
     await t.mutation(api.revocations.revoke, {

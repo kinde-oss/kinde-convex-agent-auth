@@ -14,6 +14,34 @@ const revocationDoc = schema.tables.revocations.validator.extend({
   _creationTime: v.number()
 });
 
+/**
+ * Resolve the target id for a revocation, rejecting contradictory input rather
+ * than silently coercing it. A `targetId` supplied for a "global" revocation is
+ * a mistake — a non-global revoke masquerading as a global kill switch — and is
+ * refused; a non-global revocation with no `targetId` is likewise refused.
+ */
+function normalizeTargetId(
+  targetKind: TargetKind,
+  targetId: string | null | undefined
+): string | null {
+  if (targetKind === 'global') {
+    if (targetId !== null && targetId !== undefined) {
+      fail(
+        'target_id_forbidden',
+        'targetId must be omitted for global revocations.'
+      );
+    }
+    return null;
+  }
+  if (targetId === null || targetId === undefined) {
+    fail(
+      'target_id_required',
+      `targetKind "${targetKind}" requires a targetId.`
+    );
+  }
+  return targetId;
+}
+
 async function findRevocation(
   ctx: QueryCtx,
   targetKind: TargetKind,
@@ -74,14 +102,7 @@ export const revoke = mutation({
   },
   returns: v.id('revocations'),
   handler: async (ctx, args) => {
-    const targetId =
-      args.targetKind === 'global' ? null : (args.targetId ?? null);
-    if (args.targetKind !== 'global' && targetId === null) {
-      fail(
-        'target_id_required',
-        `targetKind "${args.targetKind}" requires a targetId.`
-      );
-    }
+    const targetId = normalizeTargetId(args.targetKind, args.targetId);
     const existing = await findRevocation(ctx, args.targetKind, targetId);
     if (existing !== null) {
       return existing._id;
@@ -113,14 +134,7 @@ export const clear = mutation({
   },
   returns: v.number(),
   handler: async (ctx, args) => {
-    const targetId =
-      args.targetKind === 'global' ? null : (args.targetId ?? null);
-    if (args.targetKind !== 'global' && targetId === null) {
-      fail(
-        'target_id_required',
-        `targetKind "${args.targetKind}" requires a targetId.`
-      );
-    }
+    const targetId = normalizeTargetId(args.targetKind, args.targetId);
     const rows = await ctx.db
       .query('revocations')
       .withIndex('by_target', (q) =>

@@ -94,6 +94,48 @@ describe('jwks', () => {
     await expectFail(t.action(api.jwks.refresh, {}), 'jwks_malformed');
   });
 
+  test('refresh maps a non-JSON OpenID config response to a typed failure', async () => {
+    // Kinde returns an HTML error page instead of JSON.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input) === CONFIG_URL) {
+          return new Response('<html><body>error</body></html>', {
+            status: 200,
+            headers: {'Content-Type': 'text/html'}
+          });
+        }
+        throw new Error(`Unexpected fetch: ${String(input)}`);
+      })
+    );
+    const t = initConvexTest();
+    await expectFail(t.action(api.jwks.refresh, {}), 'oidc_config_malformed');
+  });
+
+  test('refresh maps a non-JSON JWKS response to a typed failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === CONFIG_URL) {
+          return new Response(JSON.stringify({jwks_uri: JWKS_URL}), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'}
+          });
+        }
+        if (url === JWKS_URL) {
+          return new Response('<html><body>error</body></html>', {
+            status: 200,
+            headers: {'Content-Type': 'text/html'}
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      })
+    );
+    const t = initConvexTest();
+    await expectFail(t.action(api.jwks.refresh, {}), 'jwks_malformed');
+  });
+
   test('refresh fails when the OpenID configuration lacks jwks_uri', async () => {
     stubKindeEndpoints({keys: []}, {issuer: 'whatever'});
     const t = initConvexTest();
