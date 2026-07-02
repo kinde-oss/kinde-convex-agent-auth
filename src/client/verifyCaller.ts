@@ -134,6 +134,7 @@ function extractScopes(payload: JWTPayload): string[] {
   const scp = payload['scp'];
   if (
     Array.isArray(scp) &&
+    scp.length > 0 &&
     scp.every((item): item is string => typeof item === 'string')
   ) {
     return scp;
@@ -237,7 +238,7 @@ export async function verifyCaller(
   if (subject === null) {
     const error = new ConvexError({
       code: 'missing_subject',
-      message: 'The token has neither a sub nor an azp claim.'
+      message: `The token has neither a sub nor an azp claim. Token actually carries these claim keys: [${Object.keys(payload).join(', ')}].`
     });
     await ctx.runMutation(component.verification.recordRejection, {
       code: error.data.code,

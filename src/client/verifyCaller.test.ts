@@ -180,6 +180,25 @@ describe('verifyCaller', () => {
     expect(verified.subject).toBe('client_unregistered');
   });
 
+  test('extracts scopes from `scope` when a real Kinde token has an empty `scp` array', async () => {
+    // A real Kinde M2M access token carries BOTH an empty `scp: []` and a
+    // populated space-delimited `scope` string, and has no `sub`/`org_code`.
+    const t = initConvexTest();
+    const token = await mint({
+      aud: `${ISSUER}/api`,
+      azp: 'client_unregistered',
+      scope: 'create:billing_payment_methods read:users',
+      scp: []
+    });
+    const verified = await verifyCaller(makeRunCtx(t), component, token);
+    expect(verified.scopes).toEqual([
+      'create:billing_payment_methods',
+      'read:users'
+    ]);
+    expect(verified.subject).toBe('client_unregistered');
+    expect(verified.orgCode).toBeNull();
+  });
+
   test('rejects an expired token', async () => {
     const t = initConvexTest();
     const token = await mint({azp: 'client_abc', expiresInSeconds: -60});
