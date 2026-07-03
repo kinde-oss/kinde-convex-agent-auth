@@ -66,8 +66,11 @@ export const request = mutation({
 
 /**
  * Approve a pending elevation. `approverSubject` is the step-up identity of the
- * human who approved and is required. Only a `pending` request can be approved;
- * re-approving fails rather than re-granting (idempotency by rejection).
+ * human who approved and is required. Approval records `approvedScopes` (the
+ * subset actually granted, currently the whole `requestedScopes`) so an
+ * elevation can never authorize an action the approver did not approve. Only a
+ * `pending` request can be approved; re-approving fails rather than re-granting
+ * (idempotency by rejection).
  */
 export const approve = mutation({
   args: {requestId: v.id('elevationRequests'), approverSubject: v.string()},
@@ -153,7 +156,8 @@ async function resolve(
   await ctx.db.patch('elevationRequests', args.requestId, {
     status,
     approverSubject: args.approverSubject,
-    resolvedAt: Date.now()
+    resolvedAt: Date.now(),
+    ...(status === 'approved' ? {approvedScopes: row.requestedScopes} : {})
   });
   const instance = await ctx.db.get('instances', row.instanceId);
   await writeAudit(ctx, {

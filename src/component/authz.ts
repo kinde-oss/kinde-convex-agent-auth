@@ -9,6 +9,7 @@ import {
 } from './helpers.js';
 import {findActiveRevocation} from './revocations.js';
 import {intersectScopes} from './scopes.js';
+import {nullableString} from './validators.js';
 
 const canResultValidator = v.object({
   allowed: v.boolean(),
@@ -57,8 +58,10 @@ async function findActiveDelegation(
 
 /**
  * Whether an approved, non-expired elevation grants `action` to THIS instance
- * (invariant I6). Elevations are keyed by instance, never widen beyond their
- * requestedScopes, and stop applying once expired — all enforced here.
+ * (invariant I6). Elevations are keyed by instance, never widen beyond the
+ * scopes the approver actually approved (`approvedScopes`, falling back to
+ * `requestedScopes` for rows approved before that field existed), and stop
+ * applying once expired — all enforced here.
  */
 async function hasApprovedElevation(
   ctx: MutationCtx,
@@ -75,7 +78,7 @@ async function hasApprovedElevation(
   return rows.some(
     (row) =>
       effectiveElevationStatus(row, now) === 'approved' &&
-      row.requestedScopes.includes(action)
+      (row.approvedScopes ?? row.requestedScopes).includes(action)
   );
 }
 
@@ -89,7 +92,10 @@ export const can = mutation({
   args: {
     instanceId: v.id('instances'),
     action: v.string(),
-    resource: v.optional(v.string())
+    resource: v.optional(v.string()),
+    callerAgentId: v.optional(v.union(v.id('agents'), v.null())),
+    callerOrgCode: v.optional(nullableString),
+    callerSubject: v.optional(nullableString)
   },
   returns: canResultValidator,
   handler: async (ctx, args) => {
@@ -121,7 +127,16 @@ export const can = mutation({
           reason,
           ...(context.grantedVia === undefined
             ? {}
-            : {grantedVia: context.grantedVia})
+            : {grantedVia: context.grantedVia}),
+          ...(args.callerAgentId === undefined
+            ? {}
+            : {callerAgentId: args.callerAgentId}),
+          ...(args.callerOrgCode === undefined
+            ? {}
+            : {callerOrgCode: args.callerOrgCode}),
+          ...(args.callerSubject === undefined
+            ? {}
+            : {callerSubject: args.callerSubject})
         }
       });
       return {
@@ -140,6 +155,22 @@ export const can = mutation({
       return await decide(false, 'instance_not_found');
     }
     const orgCode = instance.orgCode;
+
+    // 1a. Bind the verified caller to this instance. A host app may take the
+    // instanceId from request input, so an agent authenticated in one org (or
+    // as one agent) must not obtain decisions for another's instance — the
+    // confused deputy. Only checked when the caller identity was threaded in.
+    if (
+      (args.callerAgentId !== undefined &&
+        instance.agentId !== args.callerAgentId) ||
+      (args.callerOrgCode !== undefined &&
+        instance.orgCode !== args.callerOrgCode)
+    ) {
+      return await decide(false, 'caller_instance_mismatch', {
+        agentId: instance.agentId,
+        orgCode
+      });
+    }
 
     // 2. The instance must still be running (expired behaves as revoked — I5).
     if (effectiveInstanceStatus(instance, now) !== 'running') {

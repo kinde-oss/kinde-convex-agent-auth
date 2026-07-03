@@ -40,6 +40,26 @@ export interface VerifyCallerOptions {
    * value (or an org-less token) is denied and audited (invariant I3).
    */
   expectedOrgCode?: string;
+  /**
+   * Require the token's `azp` to map to a registered agent. When true (THE
+   * DEFAULT), a valid token whose `azp` has no `agents` row — or a token with
+   * no `azp` at all — is denied with `agent_not_registered` instead of
+   * resolving to a null `agentId`.
+   *
+   * THIS DEFAULT IS THE ONE INTENTIONAL BEHAVIORAL CHANGE OF THIS RELEASE:
+   * earlier versions allowed unregistered callers through. Pass
+   * `requireRegisteredAgent: false` to restore that behavior (e.g. for
+   * cross-app introspection where the caller need not be registered here).
+   */
+  requireRegisteredAgent?: boolean;
+  /**
+   * Require the token to carry an `org_code`. When true, an org-less token is
+   * denied with `org_code_required`. Defaults to false, preserving the current
+   * behavior where org-less (personal agent) tokens are allowed but skip org
+   * revocation and tenant policy gates. Org-scoped deployments should set this
+   * (or `expectedOrgCode`) so those gates are never silently skipped.
+   */
+  requireOrgCode?: boolean;
 }
 
 /**
@@ -150,11 +170,16 @@ async function verifyTokenSignature(
   ctx: RunActionCtx,
   component: ComponentApi,
   token: string,
-  opts: {issuer: string; audience: string | undefined}
+  opts: {issuer: string; audience: string | undefined; jwksMaxAgeMs: number}
 ): Promise<JWTPayload> {
   const cached = await ctx.runQuery(component.jwks.get, {});
+  // A cache older than maxAgeMs is treated as empty and refreshed before the
+  // first verify attempt, so a rotated-out key never lingers past its TTL. The
+  // refresh-on-unknown-kid retry below still handles rotations within the TTL.
+  const stale =
+    cached !== null && cached.fetchedAt <= Date.now() - opts.jwksMaxAgeMs;
   let keys: Jwk[] | null =
-    cached === null || cached.keys.length === 0 ? null : cached.keys;
+    cached === null || cached.keys.length === 0 || stale ? null : cached.keys;
   let refreshed = false;
   if (keys === null) {
     keys = await ctx.runAction(component.jwks.refresh, {});
@@ -201,6 +226,20 @@ async function verifyTokenSignature(
  * any failure. Every outcome — allow, deny, or unverifiable token — writes
  * one audit row.
  *
+ * BEHAVIORAL CHANGE (this release): unregistered callers are now rejected by
+ * default. See {@link VerifyCallerOptions.requireRegisteredAgent} — pass
+ * `requireRegisteredAgent: false` to restore the previous allow-through.
+ *
+ * Org-scoped deployments should pass `expectedOrgCode` or at least
+ * `requireOrgCode: true` (see {@link VerifyCallerOptions.requireOrgCode});
+ * otherwise org revocation and tenant policy gates are silently skipped for
+ * org-less tokens.
+ *
+ * To make an authorization decision for a specific instance, prefer
+ * {@link authorize} over calling this and `authz.can` separately — it binds
+ * the verified caller to the instance and prevents the confused-deputy class
+ * of bug.
+ *
  * THIS FUNCTION'S SIGNATURE IS A STABLE CONTRACT (see {@link VerifiedAgent}).
  */
 export async function verifyCaller(
@@ -218,7 +257,8 @@ export async function verifyCaller(
   try {
     payload = await verifyTokenSignature(ctx, component, token, {
       issuer,
-      audience
+      audience,
+      jwksMaxAgeMs: config.jwksMaxAgeMs
     });
   } catch (error) {
     const data = convexErrorData(error);
@@ -253,6 +293,8 @@ export async function verifyCaller(
     kindeClientId: azp,
     orgCode,
     tokenScopes: scopes,
+    requireRegisteredAgent: options.requireRegisteredAgent ?? true,
+    requireOrgCode: options.requireOrgCode ?? false,
     ...(options.expectedOrgCode === undefined
       ? {}
       : {expectedOrgCode: options.expectedOrgCode})

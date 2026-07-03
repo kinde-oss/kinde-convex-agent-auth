@@ -19,13 +19,6 @@ const checkResultValidator = v.union(
   })
 );
 
-interface CheckArgs {
-  subject: string;
-  kindeClientId: string | null;
-  orgCode: string | null;
-  tokenScopes: string[];
-}
-
 async function findRevocation(
   ctx: MutationCtx,
   targetKind: 'global' | 'org' | 'agent',
@@ -51,7 +44,9 @@ export const check = mutation({
     kindeClientId: nullableString,
     orgCode: nullableString,
     tokenScopes: v.array(v.string()),
-    expectedOrgCode: v.optional(v.string())
+    expectedOrgCode: v.optional(v.string()),
+    requireRegisteredAgent: v.optional(v.boolean()),
+    requireOrgCode: v.optional(v.boolean())
   },
   returns: checkResultValidator,
   handler: async (ctx, args) => {
@@ -88,6 +83,15 @@ export const check = mutation({
     const globalRevocation = await findRevocation(ctx, 'global', null);
     if (globalRevocation !== null) {
       return await deny('revoked_global', 'All agent access is revoked.');
+    }
+
+    // An org-less token skips org revocation and tenant policy gates. When the
+    // deployment requires a tenant context, reject such tokens explicitly (I3).
+    if (args.requireOrgCode === true && args.orgCode === null) {
+      return await deny(
+        'org_code_required',
+        "The token's org_code is absent but an org_code is required."
+      );
     }
 
     // The token's org_code is the only source of tenant context. A caller
@@ -156,6 +160,16 @@ export const check = mutation({
         }
         agentId = agent._id;
       }
+    }
+
+    // An azp with no registered agent (or a token with no azp at all) resolves
+    // to a null agentId. When the deployment only trusts registered agents,
+    // reject rather than allow an anonymous caller through.
+    if (args.requireRegisteredAgent === true && agentId === null) {
+      return await deny(
+        'agent_not_registered',
+        'No registered agent matches the token; a registered agent is required.'
+      );
     }
 
     return {

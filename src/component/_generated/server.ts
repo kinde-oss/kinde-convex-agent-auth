@@ -35,6 +35,7 @@ import type { DataModel } from "./dataModel.js";
  */
 type Env = {
   readonly DELEGATION_SIGNING_SECRET: string;
+  readonly JWKS_MAX_AGE_MS: string | undefined;
   readonly KINDE_AUDIENCE: string | undefined;
   readonly KINDE_DOMAIN: string;
   readonly MODE: "test" | "live" | undefined;

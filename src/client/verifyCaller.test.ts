@@ -9,7 +9,7 @@ import {
 } from 'vitest';
 import {SignJWT, exportJWK, generateKeyPair} from 'jose';
 import type {JWK} from 'jose';
-import {AgentAuth, verifyCaller} from './index.js';
+import {AgentAuth, authorize, verifyCaller} from './index.js';
 import {components} from '../../example/convex/_generated/api.js';
 import {expectFail, initConvexTest, makeRunCtx} from './setup.test.js';
 
@@ -18,6 +18,7 @@ const ISSUER = `https://${DOMAIN}`;
 const AUDIENCE = 'https://api.example.test';
 const CONFIG_URL = `https://${DOMAIN}/.well-known/openid-configuration`;
 const JWKS_URL = `https://${DOMAIN}/.well-known/jwks`;
+const HOUR = 60 * 60 * 1000;
 
 const component = components.agentAuth;
 
@@ -142,6 +143,7 @@ describe('verifyCaller', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   test('verifies a valid org-scoped token for a registered agent', async () => {
@@ -174,7 +176,9 @@ describe('verifyCaller', () => {
       azp: 'client_unregistered',
       scope: 'read:a write:b'
     });
-    const verified = await verifyCaller(makeRunCtx(t), component, token);
+    const verified = await verifyCaller(makeRunCtx(t), component, token, {
+      requireRegisteredAgent: false
+    });
     expect(verified.scopes).toEqual(['read:a', 'write:b']);
     expect(verified.agentId).toBeNull();
     expect(verified.subject).toBe('client_unregistered');
@@ -190,7 +194,9 @@ describe('verifyCaller', () => {
       scope: 'create:billing_payment_methods read:users',
       scp: []
     });
-    const verified = await verifyCaller(makeRunCtx(t), component, token);
+    const verified = await verifyCaller(makeRunCtx(t), component, token, {
+      requireRegisteredAgent: false
+    });
     expect(verified.scopes).toEqual([
       'create:billing_payment_methods',
       'read:users'
@@ -233,7 +239,9 @@ describe('verifyCaller', () => {
     vi.stubEnv('KINDE_AUDIENCE', AUDIENCE);
     const t = initConvexTest();
     const token = await mint({azp: 'client_abc', aud: AUDIENCE});
-    const verified = await verifyCaller(makeRunCtx(t), component, token);
+    const verified = await verifyCaller(makeRunCtx(t), component, token, {
+      requireRegisteredAgent: false
+    });
     expect(verified.subject).toBe('client_abc');
   });
 
@@ -251,7 +259,9 @@ describe('verifyCaller', () => {
     // Warm the cache with only the main key.
     let served = [mainJwk];
     stubKindeEndpoints(() => served);
-    await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}));
+    await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}), {
+      requireRegisteredAgent: false
+    });
 
     // Kinde rotates: new tokens are signed with a key not in the cache.
     served = [mainJwk, rotatedJwk];
@@ -260,7 +270,9 @@ describe('verifyCaller', () => {
       key: rotatedKey,
       kid: 'key-rotated'
     });
-    const verified = await verifyCaller(makeRunCtx(t), component, rotatedToken);
+    const verified = await verifyCaller(makeRunCtx(t), component, rotatedToken, {
+      requireRegisteredAgent: false
+    });
     expect(verified.subject).toBe('c1');
   });
 
@@ -376,6 +388,89 @@ describe('verifyCaller', () => {
     );
   });
 
+  test('rejects an unregistered azp by default with agent_not_registered', async () => {
+    const t = initConvexTest();
+    const token = await mint({azp: 'client_unregistered'});
+    await expectFail(
+      verifyCaller(makeRunCtx(t), component, token),
+      'agent_not_registered'
+    );
+  });
+
+  test('requireRegisteredAgent: false allows an unregistered azp with a null agentId', async () => {
+    const t = initConvexTest();
+    const token = await mint({azp: 'client_unregistered'});
+    const verified = await verifyCaller(makeRunCtx(t), component, token, {
+      requireRegisteredAgent: false
+    });
+    expect(verified.agentId).toBeNull();
+    expect(verified.subject).toBe('client_unregistered');
+  });
+
+  test('a fresh JWKS cache is not refetched on the next verify', async () => {
+    let jwksFetches = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === CONFIG_URL) {
+          return new Response(JSON.stringify({jwks_uri: JWKS_URL}), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'}
+          });
+        }
+        if (url === JWKS_URL) {
+          jwksFetches += 1;
+          return new Response(JSON.stringify({keys: [mainJwk]}), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'}
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      })
+    );
+    const t = initConvexTest();
+    const opts = {requireRegisteredAgent: false};
+    await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}), opts);
+    await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}), opts);
+    expect(jwksFetches).toBe(1);
+  });
+
+  test('a JWKS cache older than maxAgeMs is refreshed before verifying', async () => {
+    vi.stubEnv('JWKS_MAX_AGE_MS', String(HOUR));
+    vi.useFakeTimers({toFake: ['Date']});
+    const start = Date.now();
+    let jwksFetches = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === CONFIG_URL) {
+          return new Response(JSON.stringify({jwks_uri: JWKS_URL}), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'}
+          });
+        }
+        if (url === JWKS_URL) {
+          jwksFetches += 1;
+          return new Response(JSON.stringify({keys: [mainJwk]}), {
+            status: 200,
+            headers: {'Content-Type': 'application/json'}
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      })
+    );
+    const t = initConvexTest();
+    const opts = {requireRegisteredAgent: false};
+    await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}), opts);
+    expect(jwksFetches).toBe(1);
+    // Age the cache past maxAgeMs: the next verify refreshes first.
+    vi.setSystemTime(start + 2 * HOUR);
+    await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}), opts);
+    expect(jwksFetches).toBe(2);
+  });
+
   test('works through the AgentAuth class wrapper', async () => {
     const t = initConvexTest();
     const agentAuth = new AgentAuth(component);
@@ -399,5 +494,96 @@ describe('verifyCaller', () => {
     const verified = await agentAuth.verifyCaller(ctx, token);
     expect(verified.agentId).toBe(agentId);
     expect(verified.orgCode).toBe('org_123');
+  });
+});
+
+describe('authorize', () => {
+  beforeEach(() => {
+    vi.stubEnv('KINDE_DOMAIN', DOMAIN);
+    stubKindeEndpoints(() => [mainJwk]);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  async function registerCallableAgent(
+    t: ReturnType<typeof initConvexTest>,
+    opts: {slug: string; orgCode: string; kindeClientId: string}
+  ) {
+    return await t.mutation(component.agents.register, {
+      name: opts.slug,
+      slug: opts.slug,
+      ownerKind: 'org' as const,
+      orgCode: opts.orgCode,
+      kindeClientId: opts.kindeClientId,
+      kind: 'autonomous' as const,
+      allowedTools: [],
+      scopes: ['read']
+    });
+  }
+
+  test('authorizes an action on the caller own instance', async () => {
+    const t = initConvexTest();
+    const agentId = await registerCallableAgent(t, {
+      slug: 'bot',
+      orgCode: 'org_123',
+      kindeClientId: 'client_abc'
+    });
+    const instanceId = await t.mutation(component.instances.start, {
+      agentId,
+      runId: 'run-own',
+      orgCode: 'org_123',
+      expiresAt: Date.now() + HOUR
+    });
+    const token = await mint({
+      sub: 'client_abc',
+      azp: 'client_abc',
+      orgCode: 'org_123',
+      scp: ['read']
+    });
+    const {caller, decision} = await authorize(
+      makeRunCtx(t),
+      component,
+      token,
+      {instanceId, action: 'read'}
+    );
+    expect(caller.agentId).toBe(agentId);
+    expect(decision).toMatchObject({allowed: true, reason: 'authorized'});
+  });
+
+  test('denies when the caller does not own the target instance (confused deputy)', async () => {
+    const t = initConvexTest();
+    await registerCallableAgent(t, {
+      slug: 'bot',
+      orgCode: 'org_123',
+      kindeClientId: 'client_abc'
+    });
+    const otherAgentId = await registerCallableAgent(t, {
+      slug: 'other',
+      orgCode: 'org_999',
+      kindeClientId: 'client_other'
+    });
+    const foreignInstance = await t.mutation(component.instances.start, {
+      agentId: otherAgentId,
+      runId: 'run-foreign',
+      orgCode: 'org_999',
+      expiresAt: Date.now() + HOUR
+    });
+    const token = await mint({
+      sub: 'client_abc',
+      azp: 'client_abc',
+      orgCode: 'org_123',
+      scp: ['read']
+    });
+    const {decision} = await authorize(makeRunCtx(t), component, token, {
+      instanceId: foreignInstance,
+      action: 'read'
+    });
+    expect(decision).toMatchObject({
+      allowed: false,
+      reason: 'caller_instance_mismatch'
+    });
   });
 });

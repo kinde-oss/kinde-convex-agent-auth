@@ -663,3 +663,265 @@ describe('authz.can + elevation (I6)', () => {
     expect(result).toMatchObject({allowed: true, reason: 'authorized'});
   });
 });
+
+describe('authz.can caller/instance binding (confused deputy)', () => {
+  beforeEach(() => {
+    vi.stubEnv('DELEGATION_SIGNING_SECRET', SECRET);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  test('a caller authenticated as a different agent is denied', async () => {
+    const t = initConvexTest();
+    const agentA = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const agentB = await registerAgent(t, {
+      slug: 'b',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentA);
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'read',
+      callerAgentId: agentB
+    });
+    expect(result).toMatchObject({
+      allowed: false,
+      reason: 'caller_instance_mismatch'
+    });
+    const rows = await authzRows(t);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].agentId).toBe(agentA);
+    expect(rows[0].detail).toMatchObject({callerAgentId: agentB});
+  });
+
+  test('a caller from a different org is denied', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read'],
+      orgCode: 'org_1'
+    });
+    const instanceId = await startInstance(t, agentId, {orgCode: 'org_1'});
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'read',
+      callerOrgCode: 'org_2'
+    });
+    expect(result).toMatchObject({
+      allowed: false,
+      reason: 'caller_instance_mismatch'
+    });
+    const rows = await authzRows(t);
+    expect(rows[0].orgCode).toBe('org_1');
+    expect(rows[0].detail).toMatchObject({callerOrgCode: 'org_2'});
+  });
+
+  test('matching caller values proceed to the normal pipeline', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read'],
+      orgCode: 'org_1'
+    });
+    const instanceId = await startInstance(t, agentId, {orgCode: 'org_1'});
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'read',
+      callerAgentId: agentId,
+      callerOrgCode: 'org_1',
+      callerSubject: 'client_x'
+    });
+    expect(result).toMatchObject({allowed: true, reason: 'authorized'});
+    const rows = await authzRows(t);
+    expect(rows[0].detail).toMatchObject({
+      callerAgentId: agentId,
+      callerOrgCode: 'org_1',
+      callerSubject: 'client_x'
+    });
+  });
+
+  test('omitting the caller args behaves exactly as before (backward compat)', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'read'
+    });
+    expect(result).toMatchObject({allowed: true, reason: 'authorized'});
+    const rows = await authzRows(t);
+    expect(rows[0].detail).not.toHaveProperty('callerAgentId');
+    expect(rows[0].detail).not.toHaveProperty('callerOrgCode');
+    expect(rows[0].detail).not.toHaveProperty('callerSubject');
+  });
+});
+
+describe('authz.can approvedScopes invariant (I6)', () => {
+  beforeEach(() => {
+    vi.stubEnv('DELEGATION_SIGNING_SECRET', SECRET);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  test('an elevation approved for X does not authorize a different action Y', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const requestId = await t.mutation(api.elevation.request, {
+      instanceId,
+      requestedScopes: ['write'],
+      reason: 'need write'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId,
+      approverSubject: 'human_admin'
+    });
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'write'})
+    ).toMatchObject({allowed: true, reason: 'authorized'});
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'delete'})
+    ).toMatchObject({allowed: false, reason: 'insufficient_scope'});
+  });
+
+  test('authorization uses approvedScopes, not a requestedScopes widened after approval', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const requestId = await t.mutation(api.elevation.request, {
+      instanceId,
+      requestedScopes: ['write'],
+      reason: 'need write'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId,
+      approverSubject: 'human_admin'
+    });
+    // Widen the stored requestedScopes after the fact: approvedScopes still governs.
+    await t.run(async (ctx) =>
+      ctx.db.patch('elevationRequests', requestId, {
+        requestedScopes: ['write', 'delete']
+      })
+    );
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'delete'})
+    ).toMatchObject({allowed: false, reason: 'insufficient_scope'});
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'write'})
+    ).toMatchObject({allowed: true, reason: 'authorized'});
+  });
+
+  test('an expired approved elevation authorizes nothing', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const requestId = await t.mutation(api.elevation.request, {
+      instanceId,
+      requestedScopes: ['write'],
+      reason: 'need write'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId,
+      approverSubject: 'human_admin'
+    });
+    await t.run(async (ctx) =>
+      ctx.db.patch('elevationRequests', requestId, {
+        expiresAt: Date.now() - 1000
+      })
+    );
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'write'})
+    ).toMatchObject({allowed: false, reason: 'insufficient_scope'});
+  });
+
+  test('a legacy approved row without approvedScopes falls back to requestedScopes', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const requestId = await t.mutation(api.elevation.request, {
+      instanceId,
+      requestedScopes: ['write'],
+      reason: 'need write'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId,
+      approverSubject: 'human_admin'
+    });
+    // Simulate a row approved before the approvedScopes field existed.
+    await t.run(async (ctx) =>
+      ctx.db.patch('elevationRequests', requestId, {approvedScopes: undefined})
+    );
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'write'})
+    ).toMatchObject({allowed: true, reason: 'authorized'});
+  });
+
+  test('deny: delegation_required for a supervised agent whose delegation expired', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'supervised',
+      allowedTools: [],
+      scopes: ['read']
+    });
+    const instanceId = await startInstance(t, agentId, {
+      actingForSubject: 'user_alice'
+    });
+    const delegationId = await t.mutation(api.delegations.issue, {
+      agentId,
+      issuerSubject: 'user_alice',
+      issuerKind: 'user',
+      scopes: ['read'],
+      expiresAt: Date.now() + HOUR
+    });
+    await t.run(async (ctx) =>
+      ctx.db.patch('delegations', delegationId, {expiresAt: Date.now() - 1000})
+    );
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'read'
+    });
+    expect(result).toMatchObject({
+      allowed: false,
+      reason: 'delegation_required'
+    });
+  });
+});

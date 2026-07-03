@@ -86,6 +86,39 @@ describe('elevation', () => {
     expect(row?.resolvedAt).not.toBeNull();
   });
 
+  test('approve records approvedScopes equal to requestedScopes; deny does not', async () => {
+    const t = initConvexTest();
+    const i1 = await startInstance(t);
+    const approved = await t.mutation(api.elevation.request, {
+      instanceId: i1,
+      requestedScopes: ['write', 'read'],
+      reason: 'r'
+    });
+    await t.mutation(api.elevation.approve, {
+      requestId: approved,
+      approverSubject: 'human_admin'
+    });
+    const approvedRow = await t.run(async (ctx) =>
+      ctx.db.get('elevationRequests', approved)
+    );
+    expect(approvedRow?.approvedScopes).toEqual(['write', 'read']);
+
+    const i2 = await startInstance(t);
+    const denied = await t.mutation(api.elevation.request, {
+      instanceId: i2,
+      requestedScopes: ['write'],
+      reason: 'r'
+    });
+    await t.mutation(api.elevation.deny, {
+      requestId: denied,
+      approverSubject: 'human_admin'
+    });
+    const deniedRow = await t.run(async (ctx) =>
+      ctx.db.get('elevationRequests', denied)
+    );
+    expect(deniedRow?.approvedScopes).toBeUndefined();
+  });
+
   test('deny flips to denied and records the approver', async () => {
     const t = initConvexTest();
     const instanceId = await startInstance(t);

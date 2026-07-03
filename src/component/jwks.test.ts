@@ -158,7 +158,8 @@ describe('jwks', () => {
     expect(await t.query(api.config.get, {})).toEqual({
       domain: DOMAIN,
       audience: 'https://api.example.test',
-      mode: 'live'
+      mode: 'live',
+      jwksMaxAgeMs: 24 * 60 * 60 * 1000
     });
 
     vi.stubEnv('MODE', 'test');

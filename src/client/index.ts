@@ -7,6 +7,8 @@ import type {
 import type {ComponentApi} from '../component/_generated/component.js';
 import {verifyCaller} from './verifyCaller.js';
 import type {VerifyCallerOptions} from './verifyCaller.js';
+import {authorize} from './authorize.js';
+import type {AuthorizeOptions} from './authorize.js';
 
 export {verifyCaller} from './verifyCaller.js';
 export type {
@@ -14,6 +16,12 @@ export type {
   VerifyCallerOptions,
   RunActionCtx
 } from './verifyCaller.js';
+export {authorize} from './authorize.js';
+export type {
+  AuthorizeOptions,
+  AuthorizeResult,
+  CanResult
+} from './authorize.js';
 export {registerRoutes} from './http.js';
 export type {RegisterRoutesOptions} from './http.js';
 export type {ComponentApi} from '../component/_generated/component.js';
@@ -217,6 +225,18 @@ export class AgentAuth {
     options: VerifyCallerOptions = {}
   ) {
     return verifyCaller(ctx, this.component, token, {
+      ...this.options,
+      ...options
+    });
+  }
+
+  /**
+   * See {@link authorize} — verify the caller AND authorize an instance action
+   * in one call, binding the caller to the instance. Prefer this over calling
+   * {@link verifyCaller} and `authz.can` separately.
+   */
+  authorize(ctx: RunFullCtx, token: string, options: AuthorizeOptions) {
+    return authorize(ctx, this.component, token, {
       ...this.options,
       ...options
     });

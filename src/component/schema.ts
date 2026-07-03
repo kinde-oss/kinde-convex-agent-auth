@@ -83,6 +83,7 @@ export default defineSchema({
   elevationRequests: defineTable({
     instanceId: v.id('instances'),
     requestedScopes: v.array(v.string()),
+    approvedScopes: v.optional(v.array(v.string())),
     reason: v.string(),
     status: elevationStatusValidator,
     approverSubject: nullableString,

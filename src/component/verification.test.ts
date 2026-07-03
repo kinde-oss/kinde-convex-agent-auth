@@ -169,4 +169,95 @@ describe('verification.check', () => {
     expect(rows[0].decision).toBe('deny');
     expect(rows[0].correlationId).toBe(correlationId);
   });
+
+  test('the org-binding deny message is correctly spaced ("org_code is absent")', async () => {
+    const t = initConvexTest();
+    await registerOrgAgent(t);
+    const result = await t.mutation(api.verification.check, {
+      ...baseArgs,
+      orgCode: null
+    });
+    expect(result.allowed).toBe(false);
+    if (!result.allowed) {
+      expect(result.reason).toContain("token's org_code is absent");
+      expect(result.reason).not.toContain('org_codeis');
+    }
+  });
+});
+
+describe('verification.check requireOrgCode (I3)', () => {
+  test('denies an org-less token when requireOrgCode is set', async () => {
+    const t = initConvexTest();
+    const result = await t.mutation(api.verification.check, {
+      ...baseArgs,
+      orgCode: null,
+      requireOrgCode: true
+    });
+    expect(result).toMatchObject({allowed: false, code: 'org_code_required'});
+    const rows = await auditRows(t);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('deny');
+  });
+
+  test('an org-less token is allowed when requireOrgCode is omitted', async () => {
+    const t = initConvexTest();
+    const result = await t.mutation(api.verification.check, {
+      ...baseArgs,
+      orgCode: null
+    });
+    expect(result.allowed).toBe(true);
+  });
+
+  test('an org-scoped token is unaffected by requireOrgCode', async () => {
+    const t = initConvexTest();
+    const agentId = await registerOrgAgent(t);
+    const result = await t.mutation(api.verification.check, {
+      ...baseArgs,
+      requireOrgCode: true
+    });
+    expect(result.allowed).toBe(true);
+    if (result.allowed) {
+      expect(result.agentId).toBe(agentId);
+    }
+  });
+});
+
+describe('verification.check requireRegisteredAgent', () => {
+  test('denies an unregistered client id when requireRegisteredAgent is set', async () => {
+    const t = initConvexTest();
+    const result = await t.mutation(api.verification.check, {
+      ...baseArgs,
+      requireRegisteredAgent: true
+    });
+    expect(result).toMatchObject({
+      allowed: false,
+      code: 'agent_not_registered'
+    });
+  });
+
+  test('denies a token with no azp when requireRegisteredAgent is set', async () => {
+    const t = initConvexTest();
+    const result = await t.mutation(api.verification.check, {
+      ...baseArgs,
+      kindeClientId: null,
+      requireRegisteredAgent: true
+    });
+    expect(result).toMatchObject({
+      allowed: false,
+      code: 'agent_not_registered'
+    });
+  });
+
+  test('allows a registered agent when requireRegisteredAgent is set', async () => {
+    const t = initConvexTest();
+    const agentId = await registerOrgAgent(t);
+    const result = await t.mutation(api.verification.check, {
+      ...baseArgs,
+      requireRegisteredAgent: true
+    });
+    expect(result.allowed).toBe(true);
+    if (result.allowed) {
+      expect(result.agentId).toBe(agentId);
+    }
+  });
 });

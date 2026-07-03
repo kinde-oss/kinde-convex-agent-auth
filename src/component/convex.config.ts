@@ -10,6 +10,8 @@ export default defineComponent('agentAuth', {
     /** Secret used to HMAC-sign delegations. Required. */
     DELEGATION_SIGNING_SECRET: v.string(),
     /** "test" relaxes external calls for local development. */
-    MODE: v.optional(v.union(v.literal('test'), v.literal('live')))
+    MODE: v.optional(v.union(v.literal('test'), v.literal('live'))),
+    /** Max age of the cached Kinde JWKS in ms before refresh. Default 24h. */
+    JWKS_MAX_AGE_MS: v.optional(v.string())
   }
 });

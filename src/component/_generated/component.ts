@@ -168,7 +168,14 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       can: FunctionReference<
         "mutation",
         "internal",
-        { action: string; instanceId: string; resource?: string },
+        {
+          action: string;
+          callerAgentId?: string | null;
+          callerOrgCode?: string | null;
+          callerSubject?: string | null;
+          instanceId: string;
+          resource?: string;
+        },
         {
           allowed: boolean;
           correlationId: string;
@@ -183,7 +190,12 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "query",
         "internal",
         {},
-        { audience: string | null; domain: string; mode: "test" | "live" },
+        {
+          audience: string | null;
+          domain: string;
+          jwksMaxAgeMs: number;
+          mode: "test" | "live";
+        },
         Name
       >;
     };
@@ -275,6 +287,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           _creationTime: number;
           _id: string;
+          approvedScopes?: Array<string>;
           approverSubject: string | null;
           expiresAt: number;
           instanceId: string;
@@ -296,6 +309,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Array<{
           _creationTime: number;
           _id: string;
+          approvedScopes?: Array<string>;
           approverSubject: string | null;
           expiresAt: number;
           instanceId: string;
@@ -472,6 +486,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           expectedOrgCode?: string;
           kindeClientId: string | null;
           orgCode: string | null;
+          requireOrgCode?: boolean;
+          requireRegisteredAgent?: boolean;
           subject: string;
           tokenScopes: Array<string>;
         },
