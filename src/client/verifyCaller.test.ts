@@ -79,6 +79,33 @@ function stubKindeEndpoints(keys: () => JwkRecord[]) {
   );
 }
 
+function stubJwksCountingFetch(getKeys: () => JwkRecord[]): {
+  fetches: () => number;
+} {
+  let jwksFetches = 0;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === CONFIG_URL) {
+        return new Response(JSON.stringify({jwks_uri: JWKS_URL}), {
+          status: 200,
+          headers: {'Content-Type': 'application/json'}
+        });
+      }
+      if (url === JWKS_URL) {
+        jwksFetches += 1;
+        return new Response(JSON.stringify({keys: getKeys()}), {
+          status: 200,
+          headers: {'Content-Type': 'application/json'}
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    })
+  );
+  return {fetches: () => jwksFetches};
+}
+
 interface MintOptions {
   key?: SigningKey;
   kid?: string;
@@ -408,67 +435,27 @@ describe('verifyCaller', () => {
   });
 
   test('a fresh JWKS cache is not refetched on the next verify', async () => {
-    let jwksFetches = 0;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url === CONFIG_URL) {
-          return new Response(JSON.stringify({jwks_uri: JWKS_URL}), {
-            status: 200,
-            headers: {'Content-Type': 'application/json'}
-          });
-        }
-        if (url === JWKS_URL) {
-          jwksFetches += 1;
-          return new Response(JSON.stringify({keys: [mainJwk]}), {
-            status: 200,
-            headers: {'Content-Type': 'application/json'}
-          });
-        }
-        throw new Error(`Unexpected fetch: ${url}`);
-      })
-    );
+    const {fetches} = stubJwksCountingFetch(() => [mainJwk]);
     const t = initConvexTest();
     const opts = {requireRegisteredAgent: false};
     await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}), opts);
     await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}), opts);
-    expect(jwksFetches).toBe(1);
+    expect(fetches()).toBe(1);
   });
 
   test('a JWKS cache older than maxAgeMs is refreshed before verifying', async () => {
     vi.stubEnv('JWKS_MAX_AGE_MS', String(HOUR));
     vi.useFakeTimers({toFake: ['Date']});
     const start = Date.now();
-    let jwksFetches = 0;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url === CONFIG_URL) {
-          return new Response(JSON.stringify({jwks_uri: JWKS_URL}), {
-            status: 200,
-            headers: {'Content-Type': 'application/json'}
-          });
-        }
-        if (url === JWKS_URL) {
-          jwksFetches += 1;
-          return new Response(JSON.stringify({keys: [mainJwk]}), {
-            status: 200,
-            headers: {'Content-Type': 'application/json'}
-          });
-        }
-        throw new Error(`Unexpected fetch: ${url}`);
-      })
-    );
+    const {fetches} = stubJwksCountingFetch(() => [mainJwk]);
     const t = initConvexTest();
     const opts = {requireRegisteredAgent: false};
     await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}), opts);
-    expect(jwksFetches).toBe(1);
+    expect(fetches()).toBe(1);
     // Age the cache past maxAgeMs: the next verify refreshes first.
     vi.setSystemTime(start + 2 * HOUR);
     await verifyCaller(makeRunCtx(t), component, await mint({azp: 'c1'}), opts);
-    expect(jwksFetches).toBe(2);
+    expect(fetches()).toBe(2);
   });
 
   test('works through the AgentAuth class wrapper', async () => {

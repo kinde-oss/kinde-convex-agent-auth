@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {api} from './_generated/api.js';
+import {DEFAULT_JWKS_MAX_AGE_MS} from './config.js';
 import {expectFail, initConvexTest} from './setup.test.js';
 
 const DOMAIN = 'testco.kinde.com';
@@ -159,7 +160,7 @@ describe('jwks', () => {
       domain: DOMAIN,
       audience: 'https://api.example.test',
       mode: 'live',
-      jwksMaxAgeMs: 24 * 60 * 60 * 1000
+      jwksMaxAgeMs: DEFAULT_JWKS_MAX_AGE_MS
     });
 
     vi.stubEnv('MODE', 'test');

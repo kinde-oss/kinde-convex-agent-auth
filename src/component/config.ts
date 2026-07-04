@@ -20,7 +20,7 @@ function requireMode(): 'test' | 'live' {
 }
 
 /** Default lifetime of the cached Kinde JWKS before it is refreshed: 24h. */
-const DEFAULT_JWKS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_JWKS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * How long a cached JWKS may be served before it is treated as stale and
