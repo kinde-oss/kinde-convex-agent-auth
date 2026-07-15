@@ -60,6 +60,18 @@ export interface VerifyCallerOptions {
    * (or `expectedOrgCode`) so those gates are never silently skipped.
    */
   requireOrgCode?: boolean;
+  /**
+   * Feed the caller's live Kinde token scopes (`scp`/`scope`) into the
+   * authorization decision as an additional attenuating input. Consumed by
+   * {@link authorize} (not by `verifyCaller` alone, which makes no decision):
+   * when true, `authorize` passes the verified token scopes to `authz.can`, so
+   * an action outside the token's scopes is denied even if it is within
+   * `agent.scopes`. Attenuation-only — it can never widen a decision. Defaults
+   * to false, leaving the decision byte-for-byte unchanged. Set it so a shrunk
+   * Kinde M2M scope set takes effect immediately instead of drifting from
+   * `agent.scopes`.
+   */
+  enforceTokenScopes?: boolean;
 }
 
 /**

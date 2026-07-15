@@ -21,11 +21,12 @@ export interface RegisterRoutesOptions {
   expectedOrgCode?: string;
   /**
    * Authenticate the human approving an elevation and return their subject.
-   * THE APP IS RESPONSIBLE FOR AUTHENTICATING THE HUMAN. When provided, this
-   * hook is the sole source of `approverSubject` for `/elevation/respond` (the
-   * value in the request body is ignored) — throw to reject the caller. When
-   * OMITTED, the route falls back to the body's `approverSubject` and the app
-   * MUST protect the route by other means; never expose it unauthenticated.
+   * THE APP IS RESPONSIBLE FOR AUTHENTICATING THE HUMAN. This hook is the sole
+   * source of `approverSubject` for `/elevation/respond` — the request body is
+   * never trusted for approver identity — so throw to reject the caller. When
+   * OMITTED, `/elevation/respond` fails closed with 501: an unauthenticated
+   * approval endpoint that lets the request body assert who approved would be an
+   * open approval hole, so the route refuses to run rather than default to it.
    */
   authorizeApprover?: (request: Request) => Promise<string>;
 }
@@ -75,27 +76,23 @@ function verifyStatus(code: string): number {
 interface RespondBody {
   requestId: string;
   decision: 'approve' | 'deny';
-  approverSubject?: string;
 }
 
+// `approverSubject` is intentionally NOT parsed off the body: approver identity
+// comes only from the authorizeApprover hook (a verified human session), never
+// from attacker-controlled request contents.
 function parseRespondBody(value: unknown): RespondBody | null {
   if (typeof value !== 'object' || value === null) {
     return null;
   }
-  const {requestId, decision, approverSubject} = value as Record<
-    string,
-    unknown
-  >;
+  const {requestId, decision} = value as Record<string, unknown>;
   if (typeof requestId !== 'string' || requestId.length === 0) {
     return null;
   }
   if (decision !== 'approve' && decision !== 'deny') {
     return null;
   }
-  if (approverSubject !== undefined && typeof approverSubject !== 'string') {
-    return null;
-  }
-  return {requestId, decision, approverSubject};
+  return {requestId, decision};
 }
 
 /**
@@ -116,9 +113,10 @@ function parseRespondBody(value: unknown): RespondBody | null {
  * - `/verify` — bearer-token introspection for cross-app callers. Returns the
  *   {@link verifyCaller} result as JSON (200), or `{code, message}` with a 401
  *   (bad token) / 403 (revoked, suspended, org mismatch) status.
- * - `/elevation/respond` — a human-approval webhook. See
- *   {@link RegisterRoutesOptions.authorizeApprover} for how the human is
- *   authenticated; the app owns that.
+ * - `/elevation/respond` — a human-approval webhook. Returns 501 unless mounted
+ *   with an {@link RegisterRoutesOptions.authorizeApprover} hook that returns
+ *   the verified approver subject; the app owns authenticating the human. The
+ *   request body is never trusted for approver identity.
  */
 export function registerRoutes(
   http: HttpRouter,
@@ -167,40 +165,38 @@ export function registerRoutes(
     path: `${prefix}/elevation/respond`,
     method: 'POST',
     handler: httpActionGeneric(async (ctx, request) => {
+      // Fail closed: without a hook to verify the human, there is no trustworthy
+      // source of approver identity, so the route refuses rather than accept one
+      // the caller could forge. Checked before the body is even read.
+      const authorizeApprover = opts.authorizeApprover;
+      if (authorizeApprover === undefined) {
+        return json(501, {
+          error: 'elevation_respond_requires_authorize_approver',
+          message:
+            'Mount this route with an authorizeApprover hook that returns the verified approver subject. The request body is never trusted for approver identity.'
+        });
+      }
+
       const raw: unknown = await request.json().catch(() => null);
       const body = parseRespondBody(raw);
       if (body === null) {
         return json(400, {
           code: 'invalid_body',
-          message:
-            'Expected JSON {requestId, decision: "approve"|"deny", approverSubject?}.'
+          message: 'Expected JSON {requestId, decision: "approve"|"deny"}.'
         });
       }
 
       let approverSubject: string;
-      if (opts.authorizeApprover !== undefined) {
-        try {
-          approverSubject = await opts.authorizeApprover(request);
-        } catch (error) {
-          const info = errorInfo(error);
-          return json(403, {
-            code:
-              info.code === 'internal_error'
-                ? 'approver_unauthorized'
-                : info.code,
-            message: 'The approver could not be authenticated.'
-          });
-        }
-      } else if (
-        body.approverSubject !== undefined &&
-        body.approverSubject.length > 0
-      ) {
-        approverSubject = body.approverSubject;
-      } else {
-        return json(400, {
-          code: 'approver_required',
-          message:
-            'approverSubject is required when no authorizeApprover hook is configured; the app must protect this route.'
+      try {
+        approverSubject = await authorizeApprover(request);
+      } catch (error) {
+        const info = errorInfo(error);
+        return json(403, {
+          code:
+            info.code === 'internal_error'
+              ? 'approver_unauthorized'
+              : info.code,
+          message: 'The approver could not be authenticated.'
         });
       }
 

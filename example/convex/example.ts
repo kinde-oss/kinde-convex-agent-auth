@@ -1,9 +1,9 @@
-import {action, mutation, query} from './_generated/server.js';
+import {action, internalMutation, mutation, query} from './_generated/server.js';
 import {components} from './_generated/api.js';
 import {AgentAuth} from '@kinde-oss/kinde-convex-agent-auth';
 import {paginationOptsValidator} from 'convex/server';
 import type {FunctionArgs} from 'convex/server';
-import {v} from 'convex/values';
+import {ConvexError, v} from 'convex/values';
 
 /**
  * The component client. Construct it once with the component reference from the
@@ -18,7 +18,6 @@ export const agentAuth = new AgentAuth(components.agentAuth);
 type StartArgs = FunctionArgs<typeof components.agentAuth.instances.start>;
 type CanArgs = FunctionArgs<typeof components.agentAuth.authz.can>;
 type RequestArgs = FunctionArgs<typeof components.agentAuth.elevation.request>;
-type ApproveArgs = FunctionArgs<typeof components.agentAuth.elevation.approve>;
 type AuditArgs = FunctionArgs<typeof components.agentAuth.audit.query>;
 
 export const health = query({
@@ -31,7 +30,12 @@ export const health = query({
  * Provision an org-scoped agent from a Kinde M2M client_id. The agent is bound
  * to `orgCode` (invariant I3) and matched to verified tokens by `kindeClientId`.
  */
-export const provisionAgent = mutation({
+// INTERNAL: admin-only. Registering an agent binds a kindeClientId to Convex
+// policy; anyone who can call this and holds that M2M secret inherits the
+// registered scopes. Never expose it as a public mutation — wrap it in an
+// app-layer function that authenticates an admin first, or call it from
+// trusted server code / seed scripts.
+export const provisionAgent = internalMutation({
   args: {
     name: v.string(),
     slug: v.string(),
@@ -76,9 +80,19 @@ export const startRun = mutation({
   }
 });
 
-/** Ask whether this run may perform `action` on an optional `resource`. */
-export const checkAction = mutation({
+/**
+ * Ask whether this run may perform `action` on an optional `resource`.
+ *
+ * Raw `authz.can` must NEVER be exposed to agents directly: called without a
+ * verified caller it authorizes any path that can reach the `instanceId`,
+ * ignoring who actually holds the token (the confused-deputy bug). `authorize()`
+ * is the only safe public seam — it verifies the Kinde bearer token and binds
+ * that verified caller to the instance before deciding, so a caller that does
+ * not own the instance is denied with `caller_instance_mismatch`.
+ */
+export const checkAction = action({
   args: {
+    token: v.string(),
     instanceId: v.string(),
     action: v.string(),
     resource: v.optional(v.string())
@@ -90,25 +104,46 @@ export const checkAction = mutation({
     correlationId: v.string()
   }),
   handler: async (ctx, args) => {
-    return await ctx.runMutation(components.agentAuth.authz.can, {
+    const {decision} = await agentAuth.authorize(ctx, args.token, {
       instanceId: args.instanceId as CanArgs['instanceId'],
       action: args.action,
       ...(args.resource === undefined ? {} : {resource: args.resource})
     });
+    return decision;
   }
 });
 
-/** The agent hit a scope wall and files an elevation request for `scopes`. */
-export const requestElevation = mutation({
+/**
+ * The agent hit a scope wall and files an elevation request for `scopes`.
+ *
+ * This first VERIFIES the calling agent's Kinde token and then confirms the
+ * instance it is filing against actually belongs to that verified agent.
+ * `elevation.request` is a component mutation with no auth of its own, so
+ * without this binding an authenticated agent could open elevation requests
+ * against another agent's instance to escalate a run it does not own.
+ */
+export const requestElevation = action({
   args: {
+    token: v.string(),
     instanceId: v.string(),
     requestedScopes: v.array(v.string()),
     reason: v.string()
   },
   returns: v.string(),
   handler: async (ctx, args) => {
+    const caller = await agentAuth.verifyCaller(ctx, args.token);
+    const instanceId = args.instanceId as RequestArgs['instanceId'];
+    const instance = await ctx.runQuery(components.agentAuth.instances.get, {
+      instanceId
+    });
+    if (instance === null || instance.agentId !== caller.agentId) {
+      throw new ConvexError({
+        code: 'instance_not_owned',
+        message: 'The instance does not belong to the verified agent.'
+      });
+    }
     return await ctx.runMutation(components.agentAuth.elevation.request, {
-      instanceId: args.instanceId as RequestArgs['instanceId'],
+      instanceId,
       requestedScopes: args.requestedScopes,
       reason: args.reason
     });
@@ -116,33 +151,28 @@ export const requestElevation = mutation({
 });
 
 /**
- * Resolve an elevation request directly (the HTTP webhook in `http.ts` is the
- * other, route-based path). The APP is responsible for authenticating the human
- * before calling this; `approverSubject` is their step-up identity.
+ * There is deliberately NO public `respondElevation` wrapper.
+ *
+ * Approver identity must come from a VERIFIED HUMAN SESSION (e.g. a Kinde user
+ * access token), never from client-supplied args — a wrapper that trusts an
+ * `approverSubject` argument is an open approval hole. The supported pattern is
+ * the HTTP route mounted with an `authorizeApprover` hook in `http.ts`, which
+ * extracts the subject from a verified token. If you must resolve elevations
+ * from a Convex function, gate it behind your app's real admin auth first, then
+ * call `components.agentAuth.elevation.approve` / `.deny` with the verified
+ * subject — for example:
+ *
+ * ```ts
+ * export const respondElevation = internalMutation({
+ *   // ...only reachable after the app has authenticated an admin...
+ *   handler: async (ctx, {requestId, approverSubject}) =>
+ *     ctx.runMutation(components.agentAuth.elevation.approve, {
+ *       requestId,
+ *       approverSubject // the VERIFIED human subject, never a client arg
+ *     })
+ * });
+ * ```
  */
-export const respondElevation = mutation({
-  args: {
-    requestId: v.string(),
-    decision: v.union(v.literal('approve'), v.literal('deny')),
-    approverSubject: v.string()
-  },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const requestId = args.requestId as ApproveArgs['requestId'];
-    if (args.decision === 'approve') {
-      await ctx.runMutation(components.agentAuth.elevation.approve, {
-        requestId,
-        approverSubject: args.approverSubject
-      });
-    } else {
-      await ctx.runMutation(components.agentAuth.elevation.deny, {
-        requestId,
-        approverSubject: args.approverSubject
-      });
-    }
-    return null;
-  }
-});
 
 /** The kill switch: revoke an agent so the next authz check denies it (I2). */
 export const revokeAgent = mutation({

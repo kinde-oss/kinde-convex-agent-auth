@@ -222,68 +222,62 @@ describe('registerRoutes (mounted by the example app)', () => {
     expect(await res.json()).toMatchObject({code: 'revoked_agent'});
   });
 
-  test('POST /agent/elevation/respond approves with a body approverSubject', async () => {
+  test('POST /agent/elevation/respond returns 501 when mounted without an authorizeApprover hook', async () => {
     const t = initConvexTest();
     const requestId = await makeElevationRequest(t);
+    // A body approverSubject must NOT be honored on an unhooked route: the route
+    // fails closed rather than let the request body assert who approved.
     const res = await t.fetch('/agent/elevation/respond', {
       method: 'POST',
       body: JSON.stringify({
         requestId,
         decision: 'approve',
-        approverSubject: 'human_admin'
+        approverSubject: 'sneaky'
       })
     });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ok: true, decision: 'approve'});
+    expect(res.status).toBe(501);
+    expect(await res.json()).toMatchObject({
+      error: 'elevation_respond_requires_authorize_approver'
+    });
+    // The elevation is untouched — nothing was approved.
     const row = await t.query(component.elevation.getStatus, {requestId});
-    expect(row).toMatchObject({
-      status: 'approved',
-      approverSubject: 'human_admin'
-    });
+    expect(row).toMatchObject({status: 'pending', approverSubject: null});
   });
 
-  test('POST /agent/elevation/respond denies', async () => {
+  test('the admin mount derives approverSubject from a verified Kinde user token', async () => {
     const t = initConvexTest();
     const requestId = await makeElevationRequest(t);
-    const res = await t.fetch('/agent/elevation/respond', {
-      method: 'POST',
-      body: JSON.stringify({
-        requestId,
-        decision: 'deny',
-        approverSubject: 'human_admin'
-      })
-    });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ok: true, decision: 'deny'});
-  });
-
-  test('POST /agent/elevation/respond requires approverSubject when unhooked', async () => {
-    const t = initConvexTest();
-    const requestId = await makeElevationRequest(t);
-    const res = await t.fetch('/agent/elevation/respond', {
-      method: 'POST',
-      body: JSON.stringify({requestId, decision: 'approve'})
-    });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toMatchObject({code: 'approver_required'});
-  });
-
-  test('the admin mount derives approverSubject from the authorizeApprover hook', async () => {
-    const t = initConvexTest();
-    const requestId = await makeElevationRequest(t);
-    // The hook supplies the subject; the body value (if any) is ignored.
+    // The hook verifies the admin's Kinde user token and extracts its sub; the
+    // request body is never trusted for approver identity.
+    const adminToken = await mint({sub: 'admin_jane'});
     const res = await t.fetch('/agent-admin/elevation/respond', {
       method: 'POST',
-      headers: {'X-Admin-Subject': 'admin_jane'},
+      headers: {Authorization: `Bearer ${adminToken}`},
       body: JSON.stringify({requestId, decision: 'approve'})
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({approverSubject: 'admin_jane'});
   });
 
-  test('the admin mount rejects a request with no authenticated admin (403)', async () => {
+  test('the admin mount denies via the authorizeApprover hook', async () => {
     const t = initConvexTest();
     const requestId = await makeElevationRequest(t);
+    const adminToken = await mint({sub: 'admin_jane'});
+    const res = await t.fetch('/agent-admin/elevation/respond', {
+      method: 'POST',
+      headers: {Authorization: `Bearer ${adminToken}`},
+      body: JSON.stringify({requestId, decision: 'deny'})
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ok: true, decision: 'deny'});
+    const row = await t.query(component.elevation.getStatus, {requestId});
+    expect(row).toMatchObject({status: 'denied', approverSubject: 'admin_jane'});
+  });
+
+  test('the admin mount rejects a request with no approver token (403)', async () => {
+    const t = initConvexTest();
+    const requestId = await makeElevationRequest(t);
+    // No Authorization header — the hook throws, so no approval happens.
     const res = await t.fetch('/agent-admin/elevation/respond', {
       method: 'POST',
       body: JSON.stringify({
@@ -293,5 +287,21 @@ describe('registerRoutes (mounted by the example app)', () => {
       })
     });
     expect(res.status).toBe(403);
+  });
+
+  test('the admin mount rejects a forged approver token (403)', async () => {
+    const t = initConvexTest();
+    const requestId = await makeElevationRequest(t);
+    // A token signed by a key outside the tenant JWKS must not authenticate an
+    // approver.
+    const forged = await mint({sub: 'admin_jane', key: rogueKey});
+    const res = await t.fetch('/agent-admin/elevation/respond', {
+      method: 'POST',
+      headers: {Authorization: `Bearer ${forged}`},
+      body: JSON.stringify({requestId, decision: 'approve'})
+    });
+    expect(res.status).toBe(403);
+    const row = await t.query(component.elevation.getStatus, {requestId});
+    expect(row).toMatchObject({status: 'pending'});
   });
 });

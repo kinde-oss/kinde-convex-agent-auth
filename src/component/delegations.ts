@@ -138,7 +138,12 @@ export async function verifyDelegation(
   return {valid: true};
 }
 
-function requireSigningSecret(): string {
+/**
+ * The component signing secret, or a machine-readable failure if unset. Shared
+ * with `authz.can` so it can re-verify delegation signatures at decision time
+ * with the exact same secret `issue`/`verify` use.
+ */
+export function requireSigningSecret(): string {
   const secret = env.DELEGATION_SIGNING_SECRET;
   if (!secret) {
     fail(
@@ -161,6 +166,9 @@ export const issue = mutation({
     issuerSubject: v.string(),
     issuerKind: issuerKindValidator,
     scopes: v.array(v.string()),
+    // Audit metadata only. Stored and covered by the delegation signature, but
+    // NOT evaluated in any allow/deny decision today; do not rely on it for
+    // ABAC or resource-scoping. Only `scopes` gate authorization.
     resources: v.optional(nullableStringArray),
     expiresAt: v.number()
   },
@@ -171,6 +179,20 @@ export const issue = mutation({
     const agent = await ctx.db.get('agents', args.agentId);
     if (agent === null) {
       fail('agent_not_found', 'No such agent.');
+    }
+    // Reject scopes the agent was never granted at issue time. authz.can already
+    // intersects a delegation with agent.scopes so an over-broad grant cannot
+    // widen authority, but storing scopes outside the agent's set pollutes the
+    // audit trail and delegation UX with authority that can never take effect.
+    // Fail closed here so a delegation always represents a real, usable subset.
+    const exceeding = args.scopes.filter(
+      (scope) => !agent.scopes.includes(scope)
+    );
+    if (exceeding.length > 0) {
+      fail(
+        'scopes_exceed_agent',
+        `Requested scopes are not granted to this agent: ${exceeding.join(', ')}.`
+      );
     }
     if (args.expiresAt <= now) {
       fail('invalid_expiry', 'expiresAt must be in the future.');

@@ -173,6 +173,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           callerAgentId?: string | null;
           callerOrgCode?: string | null;
           callerSubject?: string | null;
+          callerTokenScopes?: Array<string>;
           instanceId: string;
           resource?: string;
         },

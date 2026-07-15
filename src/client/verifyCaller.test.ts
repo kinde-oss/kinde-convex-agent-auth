@@ -408,10 +408,12 @@ describe('verifyCaller', () => {
       verifyCaller(makeRunCtx(t), component, tokenOtherOrg),
       'org_mismatch'
     );
+    // An org-bound agent presenting an org-less token gets the distinct,
+    // clearer code (Phase 5b), not the generic org_mismatch.
     const tokenNoOrg = await mint({sub: 'client_abc', azp: 'client_abc'});
     await expectFail(
       verifyCaller(makeRunCtx(t), component, tokenNoOrg),
-      'org_mismatch'
+      'org_code_required_for_org_agent'
     );
   });
 

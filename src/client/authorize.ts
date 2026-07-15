@@ -58,7 +58,13 @@ export async function authorize(
     ...(resource === undefined ? {} : {resource}),
     callerAgentId: caller.agentId as CanArgs['callerAgentId'],
     callerOrgCode: caller.orgCode,
-    callerSubject: caller.subject
+    callerSubject: caller.subject,
+    // Only thread the token scopes when the app opts in; otherwise the decision
+    // is byte-for-byte unchanged. This is the sole safe place to add them —
+    // authorize() has the verified caller in hand.
+    ...(options.enforceTokenScopes === true
+      ? {callerTokenScopes: caller.scopes}
+      : {})
   });
   return {caller, decision};
 }

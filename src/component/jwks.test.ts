@@ -166,4 +166,32 @@ describe('jwks', () => {
     vi.stubEnv('MODE', 'test');
     expect(await t.query(api.config.get, {})).toMatchObject({mode: 'test'});
   });
+
+  test('config.get requires KINDE_AUDIENCE in live mode', async () => {
+    // Live mode with no audience is a cross-audience replay risk, so it fails.
+    vi.stubEnv('MODE', 'live');
+    const t = initConvexTest();
+    await expectFail(
+      t.query(api.config.get, {}),
+      'kinde_audience_required_in_live'
+    );
+    // Test mode legitimately omits the audience.
+    vi.stubEnv('MODE', 'test');
+    expect(await t.query(api.config.get, {})).toMatchObject({audience: null});
+  });
+
+  test('MODE defaults to live when unset, so the audience gate fails closed', async () => {
+    // Unset MODE resolves to "live" (requireMode's default). With no audience
+    // configured, the live-mode gate must therefore fire — the fail-closed
+    // default working as intended.
+    vi.stubEnv('MODE', undefined);
+    const t = initConvexTest();
+    await expectFail(
+      t.query(api.config.get, {}),
+      'kinde_audience_required_in_live'
+    );
+    // With an audience set, the unset MODE is confirmed to resolve to "live".
+    vi.stubEnv('KINDE_AUDIENCE', 'https://api.example.test');
+    expect(await t.query(api.config.get, {})).toMatchObject({mode: 'live'});
+  });
 });

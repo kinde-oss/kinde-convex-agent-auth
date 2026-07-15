@@ -51,6 +51,37 @@ describe('intersectScopes', () => {
     ).toEqual(['admin', 'read']);
   });
 
+  test('an omitted callerTokenScopes leaves the result unchanged (byte-for-byte)', () => {
+    const three = intersectScopes(['read', 'write'], ['read', 'write'], null);
+    const four = intersectScopes(
+      ['read', 'write'],
+      ['read', 'write'],
+      null,
+      undefined
+    );
+    expect(four).toEqual(three);
+    // A null callerTokenScopes is likewise a skipped gate.
+    expect(
+      intersectScopes(['read', 'write'], ['read', 'write'], null, null)
+    ).toEqual(['read', 'write']);
+  });
+
+  test('callerTokenScopes attenuate further but cannot introduce new scopes', () => {
+    // Token grants only 'read', so 'write' is dropped even though agent and
+    // delegation both allow it.
+    expect(
+      intersectScopes(['read', 'write'], ['read', 'write'], null, ['read'])
+    ).toEqual(['read']);
+    // An empty token set collapses the effective scopes to empty.
+    expect(
+      intersectScopes(['read', 'write'], ['read', 'write'], null, [])
+    ).toEqual([]);
+    // A token scope outside the agent∩delegation set cannot widen the result.
+    expect(
+      intersectScopes(['read'], ['read'], null, ['read', 'admin'])
+    ).toEqual(['read']);
+  });
+
   test('duplicates within an input do not duplicate the output', () => {
     expect(
       intersectScopes(

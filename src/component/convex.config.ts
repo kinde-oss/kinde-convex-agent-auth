@@ -5,7 +5,11 @@ export default defineComponent('agentAuth', {
   env: {
     /** Kinde domain, e.g. "myapp.kinde.com" (no protocol). Required. */
     KINDE_DOMAIN: v.string(),
-    /** Expected `aud` claim for M2M tokens. Optional: skipped if unset. */
+    /**
+     * Expected `aud` claim for M2M tokens. Required in live mode (config.get
+     * fails without it); optional in test mode. Schema stays optional so test
+     * mode can omit it — the live-mode requirement is enforced at runtime.
+     */
     KINDE_AUDIENCE: v.optional(v.string()),
     /** Secret used to HMAC-sign delegations. Required. */
     DELEGATION_SIGNING_SECRET: v.string(),

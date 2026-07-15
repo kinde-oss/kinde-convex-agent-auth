@@ -66,6 +66,37 @@ describe('delegations', () => {
     );
   });
 
+  test('issue rejects scopes the agent was never granted', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t);
+    // agent.scopes is ['read', 'write']; 'admin' and 'delete' are outside it.
+    await expectFail(
+      t.mutation(api.delegations.issue, {
+        agentId,
+        issuerSubject: 'user_alice',
+        issuerKind: 'user',
+        scopes: ['read', 'admin', 'delete'],
+        expiresAt: Date.now() + HOUR
+      }),
+      'scopes_exceed_agent'
+    );
+  });
+
+  test('issue accepts a strict subset of the agent scopes', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t);
+    const delegationId = await t.mutation(api.delegations.issue, {
+      agentId,
+      issuerSubject: 'user_alice',
+      issuerKind: 'user',
+      scopes: ['read'],
+      expiresAt: Date.now() + HOUR
+    });
+    expect(await t.query(api.delegations.verify, {delegationId})).toEqual({
+      valid: true
+    });
+  });
+
   test('issue rejects an unknown agent', async () => {
     const t = initConvexTest();
     const agentId = await registerAgent(t);

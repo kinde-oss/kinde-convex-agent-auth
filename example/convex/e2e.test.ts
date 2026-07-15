@@ -9,8 +9,20 @@ import {
 } from 'vitest';
 import {SignJWT, exportJWK, generateKeyPair} from 'jose';
 import type {JWK} from 'jose';
-import {api} from './_generated/api.js';
+import {ConvexError} from 'convex/values';
+import {api, internal} from './_generated/api.js';
 import {initConvexTest} from './setup.test.js';
+
+/** The machine-readable code carried by a ConvexError, handling convex-test's
+ * occasional JSON-string re-serialization of the error data. */
+function convexCode(error: unknown): string | null {
+  if (!(error instanceof ConvexError)) {
+    return null;
+  }
+  const raw: unknown = error.data;
+  const data = typeof raw === 'string' ? (JSON.parse(raw) as unknown) : raw;
+  return (data as {code?: string}).code ?? null;
+}
 
 const DOMAIN = 'acme.kinde.com';
 const ISSUER = `https://${DOMAIN}`;
@@ -113,8 +125,10 @@ describe('end-to-end agent lifecycle', () => {
 
     // 1. Provision an org-scoped agent from a Kinde M2M client_id. Its granted
     //    scope is tickets.read only; tickets.write is an allowed tool but NOT a
-    //    granted scope (so it will need elevation later).
-    const agentId = await t.mutation(api.example.provisionAgent, {
+    //    granted scope (so it will need elevation later). provisionAgent is an
+    //    INTERNAL admin-only function — reached here via `internal`, never a
+    //    public client call.
+    const agentId = await t.mutation(internal.example.provisionAgent, {
       name: 'Support Bot',
       slug: 'support-bot',
       orgCode: 'org_acme',
@@ -151,8 +165,10 @@ describe('end-to-end agent lifecycle', () => {
       orgCode: 'org_acme'
     });
 
-    // 4. An in-scope tool is allowed.
-    const readAllowed = await t.mutation(api.example.checkAction, {
+    // 4. An in-scope tool is allowed. checkAction is an action: it verifies the
+    //    bearer token and binds that caller to the instance via authorize().
+    const readAllowed = await t.action(api.example.checkAction, {
+      token,
       instanceId,
       action: 'tickets.read',
       resource: 'ticket:42'
@@ -160,7 +176,8 @@ describe('end-to-end agent lifecycle', () => {
     expect(readAllowed).toMatchObject({allowed: true, reason: 'authorized'});
 
     // 5. An out-of-scope tool is denied, and tells the caller what to request.
-    const writeDenied = await t.mutation(api.example.checkAction, {
+    const writeDenied = await t.action(api.example.checkAction, {
+      token,
       instanceId,
       action: 'tickets.write'
     });
@@ -170,51 +187,62 @@ describe('end-to-end agent lifecycle', () => {
       requiredScopes: ['tickets.write']
     });
 
-    // 6. The agent files an elevation request; a human approves it through the
-    //    /agent-admin/elevation/respond route (the hook supplies the approver).
-    //    The very same authz check now passes, granted via the elevation (I6).
-    const requestId = await t.mutation(api.example.requestElevation, {
+    // 6. The agent files an elevation request (its token is verified and the
+    //    instance ownership checked first); a human approves it through the
+    //    /agent-admin/elevation/respond route by presenting a verified Kinde
+    //    user token. The very same authz check now passes, granted via the
+    //    elevation (I6).
+    const requestId = await t.action(api.example.requestElevation, {
+      token,
       instanceId,
       requestedScopes: ['tickets.write'],
       reason: 'customer asked us to update the ticket'
     });
+    const adminToken = await mint({sub: 'admin_alice'});
     const respondRes = await t.fetch('/agent-admin/elevation/respond', {
       method: 'POST',
-      headers: {'X-Admin-Subject': 'admin_alice'},
+      headers: {Authorization: `Bearer ${adminToken}`},
       body: JSON.stringify({requestId, decision: 'approve'})
     });
     expect(respondRes.status).toBe(200);
-    const writeAllowed = await t.mutation(api.example.checkAction, {
+    const writeAllowed = await t.action(api.example.checkAction, {
+      token,
       instanceId,
       action: 'tickets.write'
     });
     expect(writeAllowed).toMatchObject({allowed: true, reason: 'authorized'});
 
-    // 7. Kill switch mid-run: revoke the agent. The next authz check denies
-    //    immediately, even though the token is still valid and unexpired (I2).
+    // 7. Kill switch mid-run: revoke the agent. The very next call cannot even
+    //    get past token verification — authorize()/verifyCaller consult the
+    //    revocation overlay and throw before any decision is made (I2), even
+    //    though the token is still cryptographically valid and unexpired.
     await t.mutation(api.example.revokeAgent, {
       agentId,
       reason: 'security incident'
     });
-    const afterRevoke = await t.mutation(api.example.checkAction, {
-      instanceId,
-      action: 'tickets.read'
-    });
-    expect(afterRevoke).toMatchObject({
-      allowed: false,
-      reason: 'revoked_agent'
-    });
+    let revokedError: unknown;
+    try {
+      await t.action(api.example.checkAction, {
+        token,
+        instanceId,
+        action: 'tickets.read'
+      });
+    } catch (error) {
+      revokedError = error;
+    }
+    expect(convexCode(revokedError)).toBe('revoked_agent');
 
-    // 8. The audit trail reads as a coherent, ordered story (newest-first),
-    //    every decision carrying a correlationId (I4), and the elevated allow
-    //    recording grantedVia 'elevation'.
+    // 8. The authz decision trail reads as a coherent, ordered story
+    //    (newest-first), every decision carrying a correlationId (I4), and the
+    //    elevated allow recording grantedVia 'elevation'. The revoked read
+    //    never reached an authz decision — the kill switch stopped it at token
+    //    verification.
     const audit = await t.query(api.example.recentAudit, {
       paginationOpts: {numItems: 50, cursor: null},
       agentId,
       eventType: 'authz.decision'
     });
     expect(audit.page.map((row) => row.detail.reason)).toEqual([
-      'revoked_agent',
       'authorized',
       'insufficient_scope',
       'authorized'
@@ -222,15 +250,69 @@ describe('end-to-end agent lifecycle', () => {
     expect(
       audit.page.every((row) => typeof row.correlationId === 'string')
     ).toBe(true);
-    // The write-allow (second newest) was granted by the human elevation.
-    expect(audit.page[1].detail.grantedVia).toBe('elevation');
-    // The correlationId returned to the caller matches its audit row.
-    expect(audit.page[0].correlationId).toBe(afterRevoke.correlationId);
+    // The newest allow (tickets.write) was granted by the human elevation.
+    expect(audit.page[0].detail.grantedVia).toBe('elevation');
+
+    // The kill switch is visible as a caller.verified deny (revoked_agent),
+    // not an authz decision — verification refused the token outright.
+    const verifiedTrail = await t.query(api.example.recentAudit, {
+      paginationOpts: {numItems: 50, cursor: null},
+      agentId,
+      eventType: 'caller.verified'
+    });
+    expect(verifiedTrail.page[0].decision).toBe('deny');
+    expect(verifiedTrail.page[0].detail.code).toBe('revoked_agent');
+  });
+
+  test('an agent cannot file elevation against another agent instance (instance_not_owned)', async () => {
+    const t = initConvexTest();
+    // Two agents in the same org. Agent B owns the instance; agent A holds a
+    // valid token but no claim to B's run.
+    const agentB = await t.mutation(internal.example.provisionAgent, {
+      name: 'Bot B',
+      slug: 'bot-b',
+      orgCode: 'org_acme',
+      kindeClientId: 'm2m_b',
+      allowedTools: ['tickets.read'],
+      scopes: ['tickets.read']
+    });
+    await t.mutation(internal.example.provisionAgent, {
+      name: 'Bot A',
+      slug: 'bot-a',
+      orgCode: 'org_acme',
+      kindeClientId: 'm2m_a',
+      allowedTools: ['tickets.read'],
+      scopes: ['tickets.read']
+    });
+    const instanceB = await t.mutation(api.example.startRun, {
+      agentId: agentB,
+      runId: 'run-b',
+      actingForSubject: 'user_x',
+      orgCode: 'org_acme'
+    });
+    const tokenA = await mint({
+      sub: 'm2m_a',
+      azp: 'm2m_a',
+      orgCode: 'org_acme',
+      scp: ['tickets.read']
+    });
+    let error: unknown;
+    try {
+      await t.action(api.example.requestElevation, {
+        token: tokenA,
+        instanceId: instanceB,
+        requestedScopes: ['tickets.write'],
+        reason: 'not my instance'
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(convexCode(error)).toBe('instance_not_owned');
   });
 
   test('org isolation: a token for another org is not authorized (I3)', async () => {
     const t = initConvexTest();
-    await t.mutation(api.example.provisionAgent, {
+    await t.mutation(internal.example.provisionAgent, {
       name: 'Support Bot',
       slug: 'support-bot',
       orgCode: 'org_acme',
@@ -255,7 +337,7 @@ describe('end-to-end agent lifecycle', () => {
 
   test('introspectToken (client path) resolves a valid token', async () => {
     const t = initConvexTest();
-    const agentId = await t.mutation(api.example.provisionAgent, {
+    const agentId = await t.mutation(internal.example.provisionAgent, {
       name: 'Support Bot',
       slug: 'support-bot',
       orgCode: 'org_acme',
@@ -279,7 +361,7 @@ describe('end-to-end agent lifecycle', () => {
 
   test('an expired token is rejected at the /verify route (401)', async () => {
     const t = initConvexTest();
-    await t.mutation(api.example.provisionAgent, {
+    await t.mutation(internal.example.provisionAgent, {
       name: 'Support Bot',
       slug: 'support-bot',
       orgCode: 'org_acme',

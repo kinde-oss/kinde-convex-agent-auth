@@ -753,6 +753,12 @@ describe('authz.can caller/instance binding (confused deputy)', () => {
   });
 
   test('omitting the caller args behaves exactly as before (backward compat)', async () => {
+    // Calling authz.can with the caller args omitted is a LEGACY INTERNAL path,
+    // kept working only for backward compatibility. It skips the caller-binding
+    // guard, so it must NEVER back a public surface: public agent endpoints must
+    // go through authorize(), which always threads the verified caller identity
+    // (agentId/orgCode/subject) into this mutation. Behavior here is unchanged;
+    // this comment only makes the intended usage explicit.
     const t = initConvexTest();
     const agentId = await registerAgent(t, {
       slug: 'a',
@@ -923,5 +929,170 @@ describe('authz.can approvedScopes invariant (I6)', () => {
       allowed: false,
       reason: 'delegation_required'
     });
+  });
+});
+
+describe('authz.can enforceTokenScopes (callerTokenScopes)', () => {
+  beforeEach(() => {
+    vi.stubEnv('DELEGATION_SIGNING_SECRET', SECRET);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  test('a narrow token denies an action within agent.scopes but outside the token', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read', 'write']
+    });
+    const instanceId = await startInstance(t, agentId);
+    // Token grants only 'read'; 'write' is in agent.scopes but not the token.
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'write',
+      callerTokenScopes: ['read']
+    });
+    expect(result).toMatchObject({
+      allowed: false,
+      reason: 'insufficient_scope'
+    });
+    // The in-token action is still allowed.
+    expect(
+      await t.mutation(api.authz.can, {
+        instanceId,
+        action: 'read',
+        callerTokenScopes: ['read']
+      })
+    ).toMatchObject({allowed: true, reason: 'authorized'});
+  });
+
+  test('without callerTokenScopes the same action is allowed (unchanged behavior)', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read', 'write']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'write'
+    });
+    expect(result).toMatchObject({allowed: true, reason: 'authorized'});
+  });
+
+  test('an empty token scope set denies every action', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'autonomous',
+      allowedTools: [],
+      scopes: ['read', 'write']
+    });
+    const instanceId = await startInstance(t, agentId);
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'read',
+      callerTokenScopes: []
+    });
+    expect(result).toMatchObject({
+      allowed: false,
+      reason: 'insufficient_scope'
+    });
+  });
+});
+
+describe('authz.can delegation integrity and ambiguity', () => {
+  beforeEach(() => {
+    vi.stubEnv('DELEGATION_SIGNING_SECRET', SECRET);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  test('a tampered delegation is skipped; the decision resolves cleanly and writes both audit rows', async () => {
+    const t = initConvexTest();
+    // A supervised agent needs a delegation to act. Its scopes include 'write',
+    // so if the tampered delegation were honored the widened grant would allow
+    // it — the deny below proves the tampered row was skipped, not trusted.
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'supervised',
+      allowedTools: [],
+      scopes: ['read', 'write']
+    });
+    const instanceId = await startInstance(t, agentId, {
+      actingForSubject: 'user_alice'
+    });
+    const delegationId = await t.mutation(api.delegations.issue, {
+      agentId,
+      issuerSubject: 'user_alice',
+      issuerKind: 'user',
+      scopes: ['read'],
+      expiresAt: Date.now() + HOUR
+    });
+    // Tamper: widen the stored scopes without re-signing, so the HMAC no longer
+    // matches its contents.
+    await t.run(async (ctx) =>
+      ctx.db.patch('delegations', delegationId, {scopes: ['read', 'write']})
+    );
+    // The tampered delegation is skipped, leaving the supervised agent with no
+    // usable delegation: a clean deny (delegation_required), never an error and
+    // never the widened 'write' grant.
+    const result = await t.mutation(api.authz.can, {
+      instanceId,
+      action: 'write'
+    });
+    expect(result).toMatchObject({
+      allowed: false,
+      reason: 'delegation_required'
+    });
+    // Both the tamper-detection event and the decision row exist for the call.
+    const events = await t.run(async (ctx) =>
+      (await ctx.db.query('auditLog').collect()).map((row) => row.eventType)
+    );
+    expect(events).toContain('delegation.signature_invalid');
+    expect(events).toContain('authz.decision');
+  });
+
+  test('among several valid delegations, the newest-expiresAt one governs (Phase 2 policy)', async () => {
+    const t = initConvexTest();
+    const agentId = await registerAgent(t, {
+      slug: 'a',
+      kind: 'supervised',
+      allowedTools: [],
+      scopes: ['read', 'write']
+    });
+    const instanceId = await startInstance(t, agentId, {
+      actingForSubject: 'user_alice'
+    });
+    // Older delegation grants 'read'; the newer one (later expiry) grants
+    // 'write'. Both are valid, unrevoked, and unexpired.
+    await t.mutation(api.delegations.issue, {
+      agentId,
+      issuerSubject: 'user_alice',
+      issuerKind: 'user',
+      scopes: ['read'],
+      expiresAt: Date.now() + HOUR
+    });
+    await t.mutation(api.delegations.issue, {
+      agentId,
+      issuerSubject: 'user_alice',
+      issuerKind: 'user',
+      scopes: ['write'],
+      expiresAt: Date.now() + 2 * HOUR
+    });
+    // The newest-expiresAt delegation's scope ('write') takes effect...
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'write'})
+    ).toMatchObject({allowed: true, reason: 'authorized'});
+    // ...and the older delegation's scope ('read') does not.
+    expect(
+      await t.mutation(api.authz.can, {instanceId, action: 'read'})
+    ).toMatchObject({allowed: false, reason: 'insufficient_scope'});
   });
 });

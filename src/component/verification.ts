@@ -136,10 +136,22 @@ export const check = mutation({
         )
         .unique();
       if (agent !== null) {
+        // An agent registered with an orgCode has declared itself tenant-bound.
+        // Accepting an org-less token for it is a tenant-isolation gap by the
+        // agent's own definition, so deny even when requireOrgCode was not set.
+        // Platform-scoped agents (orgCode null) are unaffected. This is a
+        // distinct, clearer code than the generic org_mismatch below.
+        if (agent.orgCode !== null && args.orgCode === null) {
+          return await deny(
+            'org_code_required_for_org_agent',
+            `The agent is bound to org "${agent.orgCode}" but the token carries no org_code.`,
+            agent._id
+          );
+        }
         if (agent.orgCode !== null && agent.orgCode !== args.orgCode) {
           return await deny(
             'org_mismatch',
-            `The agent is bound to org "${agent.orgCode}" but the token's org_code ${args.orgCode === null ? 'is absent' : `is "${args.orgCode}"`}.`,
+            `The agent is bound to org "${agent.orgCode}" but the token's org_code is "${args.orgCode}".`,
             agent._id
           );
         }

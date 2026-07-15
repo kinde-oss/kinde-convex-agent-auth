@@ -110,14 +110,38 @@ describe('verification.check', () => {
     expect(result).toMatchObject({allowed: false, code: 'org_mismatch'});
   });
 
-  test('denies an org-bound agent presenting an org-less token (I3)', async () => {
+  test('denies an org-bound agent presenting an org-less token with a distinct code (I3)', async () => {
     const t = initConvexTest();
     await registerOrgAgent(t);
     const result = await t.mutation(api.verification.check, {
       ...baseArgs,
       orgCode: null
     });
-    expect(result).toMatchObject({allowed: false, code: 'org_mismatch'});
+    expect(result).toMatchObject({
+      allowed: false,
+      code: 'org_code_required_for_org_agent'
+    });
+  });
+
+  test('allows a platform-scoped agent presenting an org-less token', async () => {
+    const t = initConvexTest();
+    const agentId = await t.mutation(api.agents.register, {
+      name: 'Platform Bot',
+      slug: 'platform-bot',
+      ownerKind: 'platform' as const,
+      kindeClientId: 'client_abc',
+      kind: 'autonomous' as const,
+      allowedTools: ['tickets.read'],
+      scopes: ['read:tickets']
+    });
+    const result = await t.mutation(api.verification.check, {
+      ...baseArgs,
+      orgCode: null
+    });
+    expect(result.allowed).toBe(true);
+    if (result.allowed) {
+      expect(result.agentId).toBe(agentId);
+    }
   });
 
   test('denies a suspended agent', async () => {
@@ -170,12 +194,15 @@ describe('verification.check', () => {
     expect(rows[0].correlationId).toBe(correlationId);
   });
 
-  test('the org-binding deny message is correctly spaced ("org_code is absent")', async () => {
+  test('the org-mismatch deny message is correctly spaced ("org_code is absent")', async () => {
     const t = initConvexTest();
     await registerOrgAgent(t);
+    // expectedOrgCode with an org-less token exercises the "is absent" branch of
+    // the top-level org_mismatch message.
     const result = await t.mutation(api.verification.check, {
       ...baseArgs,
-      orgCode: null
+      orgCode: null,
+      expectedOrgCode: 'org_123'
     });
     expect(result.allowed).toBe(false);
     if (!result.allowed) {

@@ -8,6 +8,7 @@ import {
   writeAudit
 } from './helpers.js';
 import {findActiveRevocation} from './revocations.js';
+import {requireSigningSecret, verifyDelegation} from './delegations.js';
 import {intersectScopes} from './scopes.js';
 import {nullableString} from './validators.js';
 
@@ -27,9 +28,23 @@ const REVOKED_CODE = {
 } as const;
 
 /**
- * Find a usable delegation for this agent + acting-for subject: not revoked and
- * not yet expired. Returns the first match, or null if the subject is anonymous
- * or no active delegation exists.
+ * Find a usable delegation for this agent + acting-for subject. Returns null if
+ * the subject is anonymous or no active delegation exists.
+ *
+ * The signature is re-verified here, at decision time, so authz never trusts an
+ * unverified row regardless of how it entered the table — a tampered or
+ * directly-inserted delegation whose HMAC does not match its contents is
+ * skipped (treated as if it doesn't exist) and recorded as a
+ * `delegation.signature_invalid` audit event so tampering is visible. We reuse
+ * `verifyDelegation` (the same machinery `delegations.issue`/`verify` use)
+ * rather than re-implementing the HMAC. `verifyDelegation` also re-checks
+ * revocation/expiry, so those are no longer filtered separately here.
+ *
+ * Ambiguous-delegation policy: when several signature-valid, unrevoked,
+ * unexpired delegations match the same agent + acting-for subject, the one with
+ * the newest `expiresAt` wins. This is deterministic (no reliance on `.collect()`
+ * order) and least-surprising, and stays attenuation-safe because the winner is
+ * still intersected with the agent's scopes downstream.
  */
 async function findActiveDelegation(
   ctx: MutationCtx,
@@ -40,20 +55,38 @@ async function findActiveDelegation(
   if (actingForSubject === null) {
     return null;
   }
+  const secret = requireSigningSecret();
   const candidates = await ctx.db
     .query('delegations')
     .withIndex('by_agent', (q) => q.eq('agentId', agentId))
     .collect();
+  let best: Doc<'delegations'> | null = null;
   for (const delegation of candidates) {
-    if (
-      delegation.issuerSubject === actingForSubject &&
-      delegation.revokedAt === null &&
-      delegation.expiresAt > now
-    ) {
-      return delegation;
+    if (delegation.issuerSubject !== actingForSubject) {
+      continue;
+    }
+    const result = await verifyDelegation(secret, delegation, now);
+    if (!result.valid) {
+      // A signature mismatch means the row was tampered with or inserted
+      // directly, bypassing `issue`. Fail closed and leave a trail.
+      if (result.code === 'bad_signature') {
+        await writeAudit(ctx, {
+          eventType: 'delegation.signature_invalid',
+          agentId,
+          scopesUsed: delegation.scopes,
+          detail: {
+            delegationId: delegation._id,
+            issuerSubject: delegation.issuerSubject
+          }
+        });
+      }
+      continue;
+    }
+    if (best === null || delegation.expiresAt > best.expiresAt) {
+      best = delegation;
     }
   }
-  return null;
+  return best;
 }
 
 /**
@@ -92,10 +125,18 @@ export const can = mutation({
   args: {
     instanceId: v.id('instances'),
     action: v.string(),
+    // Audit metadata only. Recorded on the decision's audit row but NOT
+    // evaluated in the allow/deny decision today; do not rely on it for ABAC or
+    // any resource-scoping. The allow/deny gate is action/scope-based only.
     resource: v.optional(v.string()),
     callerAgentId: v.optional(v.union(v.id('agents'), v.null())),
     callerOrgCode: v.optional(nullableString),
-    callerSubject: v.optional(nullableString)
+    callerSubject: v.optional(nullableString),
+    // The caller's live Kinde token scopes. Only sent when the app opts into
+    // enforceTokenScopes; when present it is one more attenuating input to the
+    // effective-scope intersection (step 6), so the M2M token's scopes and
+    // agent.scopes cannot silently drift apart. Omitting it changes nothing.
+    callerTokenScopes: v.optional(v.array(v.string()))
   },
   returns: canResultValidator,
   handler: async (ctx, args) => {
@@ -256,9 +297,17 @@ export const can = mutation({
       instance.actingForSubject,
       now
     );
+    // callerTokenScopes is undefined unless the app opted into
+    // enforceTokenScopes, in which case it further attenuates `effective`.
+    const callerTokenScopes = args.callerTokenScopes;
     let effective: string[];
     if (delegation !== null) {
-      effective = intersectScopes(agent.scopes, delegation.scopes, override);
+      effective = intersectScopes(
+        agent.scopes,
+        delegation.scopes,
+        override,
+        callerTokenScopes
+      );
     } else if (agent.kind === 'autonomous') {
       if (tenantPolicy !== null && !tenantPolicy.allowAutonomous) {
         return await decide(false, 'autonomous_not_allowed', {
@@ -267,7 +316,12 @@ export const can = mutation({
           scopesUsed: agent.scopes
         });
       }
-      effective = intersectScopes(agent.scopes, agent.scopes, override);
+      effective = intersectScopes(
+        agent.scopes,
+        agent.scopes,
+        override,
+        callerTokenScopes
+      );
     } else {
       return await decide(false, 'delegation_required', {
         agentId: agent._id,

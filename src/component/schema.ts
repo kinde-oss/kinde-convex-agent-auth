@@ -59,6 +59,7 @@ export default defineSchema({
     issuerSubject: v.string(),
     issuerKind: issuerKindValidator,
     scopes: v.array(v.string()),
+    // Audit metadata only (not evaluated in allow/deny; see delegations.issue).
     resources: nullableStringArray,
     expiresAt: v.number(),
     revokedAt: nullableNumber,

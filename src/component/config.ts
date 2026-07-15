@@ -63,10 +63,23 @@ export const get = query({
         'The KINDE_DOMAIN environment variable is not set for the agentAuth component.'
       );
     }
+    const mode = requireMode();
+    const audience = env.KINDE_AUDIENCE ?? null;
+    // In live mode the audience is mandatory: without it jose skips the `aud`
+    // check, so ANY valid JWT from this Kinde tenant verifies here regardless of
+    // which API it was minted for — a cross-audience replay path. Test mode
+    // legitimately omits it (the env schema stays optional), so the gate is
+    // enforced at runtime rather than in the schema.
+    if (mode === 'live' && audience === null) {
+      fail(
+        'kinde_audience_required_in_live',
+        'KINDE_AUDIENCE must be set in live mode; without it any valid JWT from this Kinde tenant verifies regardless of audience, enabling cross-audience token replay.'
+      );
+    }
     return {
       domain,
-      audience: env.KINDE_AUDIENCE ?? null,
-      mode: requireMode(),
+      audience,
+      mode,
       jwksMaxAgeMs: requireJwksMaxAgeMs()
     };
   }
