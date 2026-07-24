@@ -50,7 +50,7 @@ Read this before exposing any of this component to the network. Its functions ar
 
 3. **Agent-facing endpoints must use `authorize()` exclusively.** Never call `authz.can` from a public surface with the caller args omitted: with no caller identity, `can` authorizes any valid path that can reach the `instanceId` without binding the decision to the JWT caller — the classic confused-deputy bug. The caller-binding guard (`caller_instance_mismatch`) only protects you when identity is threaded in, and `authorize()` always threads it in (the verified `agentId` / `orgCode` / `subject`). Agent tool checks go through `authorize()`, full stop.
 
-4. **The elevation HTTP route fails closed.** `POST /agent/elevation/respond` returns **501** unless you mount it with an `authorizeApprover` hook. That hook must return an approver subject extracted from a **verified human session** (e.g. a Kinde user access token), never from the request body — the body is attacker-controlled and is never read for approver identity.
+4. **The elevation HTTP route fails closed.** `POST /agent/elevation/respond` returns **501** unless you mount it with an `authorizeApprover` hook. That hook must return an approver subject extracted from a **verified human session** (e.g. a Kinde user access token), never from the request body — the body is attacker-controlled and is never read for approver identity. The hook owns its own token verification, so it must check the `aud` claim as well as the signature and issuer — see [Elevation and the approval route](#elevation-and-the-approval-route). Verifying only signature and issuer accepts every token in your Kinde tenant, agent M2M tokens included, as an approver.
 
 5. **`instances.start` runs only after token verification.** Start an instance only inside an action that has already verified the agent's token. `actingForSubject` asserts who the agent acts for and selects which delegation applies in `authz.can`; it must come from a delegation/consent flow, not from raw client input.
 
@@ -168,7 +168,9 @@ Pass `enforceTokenScopes: true` to `authorize()` (or `verifyCaller`) to feed the
 
 When an agent hits a scope wall it files an `elevation.request`; a human approves or denies it, and an approved, unexpired elevation augments **that one instance's** effective scopes for the approved action (never beyond `approvedScopes`).
 
-Approvals come through `POST /agent/elevation/respond`, which **returns 501 unless mounted with an `authorizeApprover` hook**. The hook returns the approver's subject from a verified human session (e.g. a Kinde user access token); the request body is never trusted for approver identity. See `example/convex/http.ts` for a hook that verifies a Kinde user token against the tenant JWKS.
+Approvals come through `POST /agent/elevation/respond`, which **returns 501 unless mounted with an `authorizeApprover` hook**. The hook returns the approver's subject from a verified human session (e.g. a Kinde user access token); the request body is never trusted for approver identity. See `example/convex/http.ts` for a hook that verifies a Kinde user token's **signature, issuer and audience** against the tenant JWKS.
+
+The hook runs without a Convex ctx, so it cannot read the component's config — it reads `KINDE_DOMAIN` and `KINDE_AUDIENCE` from the app's own environment and applies the same audience rule the component applies in `config.get`: **`KINDE_AUDIENCE` is required in live mode** (the hook rejects with `kinde_audience_required_in_live` when it is unset), and a token whose `aud` is wrong — or absent — is rejected with `invalid_audience`. Without that check, any valid token from your Kinde tenant, including an agent's own M2M token, would authenticate an approver.
 
 ### API reference notes
 

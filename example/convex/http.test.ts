@@ -14,6 +14,7 @@ import {components} from './_generated/api.js';
 
 const DOMAIN = 'testco.kinde.com';
 const ISSUER = `https://${DOMAIN}`;
+const AUDIENCE = 'https://api.testco.example';
 const CONFIG_URL = `https://${DOMAIN}/.well-known/openid-configuration`;
 const JWKS_URL = `https://${DOMAIN}/.well-known/jwks`;
 const HOUR = 60 * 60 * 1000;
@@ -76,6 +77,7 @@ interface MintOptions {
   key?: SigningKey;
   sub?: string;
   azp?: string;
+  aud?: string;
   orgCode?: string;
   scp?: string[];
   expiresInSeconds?: number;
@@ -100,6 +102,9 @@ async function mint(options: MintOptions = {}): Promise<string> {
     .setExpirationTime(now + (options.expiresInSeconds ?? 3600));
   if (options.sub !== undefined) {
     jwt = jwt.setSubject(options.sub);
+  }
+  if (options.aud !== undefined) {
+    jwt = jwt.setAudience(options.aud);
   }
   return await jwt.sign(options.key ?? mainKey);
 }
@@ -271,7 +276,10 @@ describe('registerRoutes (mounted by the example app)', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ok: true, decision: 'deny'});
     const row = await t.query(component.elevation.getStatus, {requestId});
-    expect(row).toMatchObject({status: 'denied', approverSubject: 'admin_jane'});
+    expect(row).toMatchObject({
+      status: 'denied',
+      approverSubject: 'admin_jane'
+    });
   });
 
   test('the admin mount rejects a request with no approver token (403)', async () => {
@@ -303,5 +311,77 @@ describe('registerRoutes (mounted by the example app)', () => {
     expect(res.status).toBe(403);
     const row = await t.query(component.elevation.getStatus, {requestId});
     expect(row).toMatchObject({status: 'pending'});
+  });
+
+  test('the admin mount accepts an approver token with the configured audience', async () => {
+    vi.stubEnv('KINDE_AUDIENCE', AUDIENCE);
+    const t = initConvexTest();
+    const requestId = await makeElevationRequest(t);
+    const adminToken = await mint({sub: 'admin_jane', aud: AUDIENCE});
+    const res = await t.fetch('/agent-admin/elevation/respond', {
+      method: 'POST',
+      headers: {Authorization: `Bearer ${adminToken}`},
+      body: JSON.stringify({requestId, decision: 'approve'})
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({approverSubject: 'admin_jane'});
+  });
+
+  test('the admin mount rejects an approver token minted for another audience (403)', async () => {
+    vi.stubEnv('KINDE_AUDIENCE', AUDIENCE);
+    const t = initConvexTest();
+    const requestId = await makeElevationRequest(t);
+    // A perfectly valid token from the same Kinde tenant, but minted for a
+    // different API — the cross-audience replay the aud gate exists to stop.
+    const adminToken = await mint({
+      sub: 'admin_jane',
+      aud: 'https://other-api.testco.example'
+    });
+    const res = await t.fetch('/agent-admin/elevation/respond', {
+      method: 'POST',
+      headers: {Authorization: `Bearer ${adminToken}`},
+      body: JSON.stringify({requestId, decision: 'approve'})
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({code: 'invalid_audience'});
+    const row = await t.query(component.elevation.getStatus, {requestId});
+    expect(row).toMatchObject({status: 'pending', approverSubject: null});
+  });
+
+  test('the admin mount rejects an approver token with no aud claim (403)', async () => {
+    vi.stubEnv('KINDE_AUDIENCE', AUDIENCE);
+    const t = initConvexTest();
+    const requestId = await makeElevationRequest(t);
+    const adminToken = await mint({sub: 'admin_jane'});
+    const res = await t.fetch('/agent-admin/elevation/respond', {
+      method: 'POST',
+      headers: {Authorization: `Bearer ${adminToken}`},
+      body: JSON.stringify({requestId, decision: 'approve'})
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({code: 'invalid_audience'});
+    const row = await t.query(component.elevation.getStatus, {requestId});
+    expect(row).toMatchObject({status: 'pending', approverSubject: null});
+  });
+
+  test('the admin mount fails closed when KINDE_AUDIENCE is unset in live mode', async () => {
+    // Same gate the component applies in config.get: without an audience jose
+    // would skip the aud check entirely, so the hook refuses to verify at all
+    // rather than authenticate an approver from any tenant token.
+    vi.stubEnv('MODE', 'live');
+    const t = initConvexTest();
+    const requestId = await makeElevationRequest(t);
+    const adminToken = await mint({sub: 'admin_jane', aud: AUDIENCE});
+    const res = await t.fetch('/agent-admin/elevation/respond', {
+      method: 'POST',
+      headers: {Authorization: `Bearer ${adminToken}`},
+      body: JSON.stringify({requestId, decision: 'approve'})
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({
+      code: 'kinde_audience_required_in_live'
+    });
+    const row = await t.query(component.elevation.getStatus, {requestId});
+    expect(row).toMatchObject({status: 'pending', approverSubject: null});
   });
 });
