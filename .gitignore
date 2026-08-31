@@ -23,3 +23,19 @@ coverage/
 
 # ---------------------------------------------------------------------
 # Add specific rules here…
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# npm pack output
+*.tgz
+
+# ESLint cache
+.eslintcache
+
+# Convex local state
+.env.local
+.convex/
+
+# Claude Code local config
+.claude/
